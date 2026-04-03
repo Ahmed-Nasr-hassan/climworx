@@ -140,12 +140,12 @@ jobs:
             echo 'yfirst    = 90.0'
             echo 'yinc      = -0.125'
           } > "$ASSETS/target_grid_world_0125.txt"
-          echo "::group::cdo genbil (weights_bilinear.nc)"
-          cdo -O genbil,"$ASSETS/target_grid_world_0125.txt" \
-            "$ASSETS/icon_grid_R19B07_L.nc" "$ASSETS/weights_bilinear.nc"
+          echo "::group::cdo gendis (weights_distance.nc)"
+          cdo -O gendis,"$ASSETS/target_grid_world_0125.txt" \
+            "$ASSETS/icon_grid_R19B07_L.nc" "$ASSETS/weights_distance.nc"
           echo "::endgroup::"
-          echo "::group::cdo gencon (weights_conservative.nc)"
-          cdo -O gencon,"$ASSETS/target_grid_world_0125.txt" \
+          echo "::group::cdo genycon (weights_conservative.nc)"
+          cdo -O genycon,"$ASSETS/target_grid_world_0125.txt" \
             "$ASSETS/icon_grid_R19B07_L.nc" "$ASSETS/weights_conservative.nc"
           echo "::endgroup::"
           rm -f "$ASSETS/icon_grid_R19B07_L.nc"

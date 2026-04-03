@@ -245,7 +245,7 @@ WEIGHTS_MAP: dict[str, str] = {
     "tot_prec": "weights_conservative.nc",
     "aswdir_s": "weights_conservative.nc",
     "clct": "weights_conservative.nc",
-    # t_2m, u_10m, v_10m, pmsl, relhum_2m → weights_bilinear.nc (default)
+    # t_2m, u_10m, v_10m, pmsl, relhum_2m → weights_distance.nc (default)
 }
 
 
@@ -297,10 +297,10 @@ def regrid_grib_bytes(
     else:
         assert ASSETS_DIR.is_dir(), (
             f"Production regrid requires {ASSETS_DIR} with remap assets "
-            f"(target_grid_world_0125.txt, weights_bilinear.nc, weights_conservative.nc)"
+            f"(target_grid_world_0125.txt, weights_distance.nc, weights_conservative.nc)"
         )
         target_grid = ASSETS_DIR / "target_grid_world_0125.txt"
-        weights = ASSETS_DIR / WEIGHTS_MAP.get(param, "weights_bilinear.nc")
+        weights = ASSETS_DIR / WEIGHTS_MAP.get(param, "weights_distance.nc")
         assert target_grid.is_file(), f"Missing target grid file: {target_grid}"
         assert weights.is_file(), f"Missing weights file for {param}: {weights}"
 
