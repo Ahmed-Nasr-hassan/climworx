@@ -60,7 +60,8 @@ variable "worker_script_path" {
 # ---------------------------------------------------------------------------
 
 provider "cloudflare" {
-  account_id = var.account_id
+  # Authenticates via CLOUDFLARE_API_TOKEN env var.
+  # account_id is passed per-resource, not at provider level.
 }
 
 # ---------------------------------------------------------------------------
@@ -89,10 +90,11 @@ resource "cloudflare_workers_kv_namespace" "metadata_cache" {
 # Cloudflare Worker Script
 # ---------------------------------------------------------------------------
 
-resource "cloudflare_worker_script" "api" {
+resource "cloudflare_workers_script" "api" {
   account_id = var.account_id
   name       = var.worker_name
   content    = file(var.worker_script_path)
+  module     = true
 
   # Bind the R2 bucket — Worker accesses data via binding, never via public URL
   r2_bucket_binding {
@@ -115,7 +117,7 @@ resource "cloudflare_worker_script" "api" {
 # resource "cloudflare_worker_route" "api_route" {
 #   zone_id     = var.zone_id
 #   pattern     = "weather-api.example.com/*"
-#   script_name = cloudflare_worker_script.api.name
+#   script_name = cloudflare_workers_script.api.name
 # }
 
 # ---------------------------------------------------------------------------
@@ -140,5 +142,5 @@ output "kv_namespace_id" {
 
 output "worker_name" {
   description = "Deployed Worker name"
-  value       = cloudflare_worker_script.api.name
+  value       = cloudflare_workers_script.api.name
 }
