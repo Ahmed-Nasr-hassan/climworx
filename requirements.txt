@@ -1,0 +1,8 @@
+xarray
+cfgrib
+zarr
+s3fs
+numcodecs
+numpy
+requests
+netCDF4

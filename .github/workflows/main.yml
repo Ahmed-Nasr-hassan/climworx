@@ -87,14 +87,7 @@ jobs:
     strategy:
       matrix:
         parameter:
-          - t_2m
           - tot_prec
-          - u_10m
-          - v_10m
-          - pmsl
-          - clct
-          - relhum_2m
-          - aswdir_s
       fail-fast: false   # Continue other parameters if one fails
 
     steps:
@@ -209,7 +202,7 @@ jobs:
             --run-date  "$RUN_DATE"  \
             --keep-runs "$KEEP_RUNS" \
             --validate-only \
-            --params t_2m tot_prec u_10m v_10m pmsl clct relhum_2m aswdir_s \
+            --params tot_prec \
             $ENSEMBLE_FLAG
 
           END=$(date -u +%s)
@@ -238,6 +231,6 @@ jobs:
           echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
           echo "| Run | \`${RUN_DATE}${MODEL_RUN}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Parameters | t_2m, tot_prec, u_10m, v_10m, pmsl, clct, relhum_2m, aswdir_s |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameters | tot_prec |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Ensemble | ${{ env.ENABLE_ENSEMBLE }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Status | ✅ Promoted to /runs/ and /latest/ updated |" >> "$GITHUB_STEP_SUMMARY"
