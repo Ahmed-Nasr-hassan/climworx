@@ -103,7 +103,7 @@ jobs:
       - name: Install CDO
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cdo
+          sudo apt-get install -y --no-install-recommends cdo bzip2
 
       - name: Install Python dependencies
         run: |
@@ -117,6 +117,39 @@ jobs:
             numpy \
             requests \
             netCDF4
+
+      - name: Build CDO remap assets (DWD native grid → weights)
+        run: |
+          set -euo pipefail
+          ASSETS="${GITHUB_WORKSPACE}/assets"
+          mkdir -p "$ASSETS"
+          # Official ICON Global native grid (not ICON_*_EASY weights tarball)
+          GRID_URL="https://opendata.dwd.de/weather/lib/cdo/icon_grid_0047_R19B07_L.nc.bz2"
+          echo "::group::Download DWD icon_grid_0047_R19B07_L.nc.bz2"
+          curl -fsSL -o /tmp/icon_grid.nc.bz2 "$GRID_URL"
+          bunzip2 -f /tmp/icon_grid.nc.bz2
+          mv /tmp/icon_grid.nc "$ASSETS/icon_grid_R19B07_L.nc"
+          echo "::endgroup::"
+          # Target lon/lat grid — must match etl.py GRID_NX / GRID_NY
+          {
+            echo 'gridtype  = lonlat'
+            echo 'xsize     = 2879'
+            echo 'ysize     = 1441'
+            echo 'xfirst    = -180.0'
+            echo 'xinc      = 0.125'
+            echo 'yfirst    = 90.0'
+            echo 'yinc      = -0.125'
+          } > "$ASSETS/target_grid_world_0125.txt"
+          echo "::group::cdo genbil (weights_bilinear.nc)"
+          cdo -O genbil,"$ASSETS/target_grid_world_0125.txt" \
+            "$ASSETS/icon_grid_R19B07_L.nc" "$ASSETS/weights_bilinear.nc"
+          echo "::endgroup::"
+          echo "::group::cdo gencon (weights_conservative.nc)"
+          cdo -O gencon,"$ASSETS/target_grid_world_0125.txt" \
+            "$ASSETS/icon_grid_R19B07_L.nc" "$ASSETS/weights_conservative.nc"
+          echo "::endgroup::"
+          rm -f "$ASSETS/icon_grid_R19B07_L.nc"
+          ls -la "$ASSETS"
 
       - name: Run ETL (download → regrid → stage)
         env:
