@@ -2,11 +2,15 @@
 """
 Local smoke test: exercises the full ETL flow (download → decompress → regrid → Zarr)
 without pushing to R2. Tests 2 forecast steps to keep it fast.
+
+Remap weights are built the same way as GitHub Actions: native ICON grid + sample GRIB2
+from DWD, then cdo gendis / genycon with -setgrid (see .github/workflows/main.yml).
 """
 import bz2
 import shutil
-import tarfile
+import subprocess
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -22,42 +26,142 @@ from etl import (
     make_encoding,
     make_chunks,
     PARAM_BOUNDS,
+    WEIGHTS_MAP,
 )
 
 PARAM = "tot_prec"
 MODEL = "icon"
 TEST_STEPS = [0, 1]  # Only test first 2 steps for speed
 
-# DWD EASY tarball (not used by production etl.py — only for this smoke test)
-DWD_EASY_WEIGHTS_URL = (
-    "https://opendata.dwd.de/weather/lib/cdo/ICON_GLOBAL2WORLD_0125_EASY.tar.bz2"
-)
-_EASY_CACHE = Path(tempfile.gettempdir()) / "icon_weights"
-_EASY_DIR = _EASY_CACHE / "ICON_GLOBAL2WORLD_0125_EASY"
-_EASY_TARGET_GRID = _EASY_DIR / "target_grid_world_0125.txt"
-_EASY_WEIGHTS_NC = _EASY_DIR / "weights_icogl2world_0125.nc"
+_REMAP_CACHE = Path(tempfile.gettempdir()) / "climworx_test_remap"
+_ICON_GRID_URL = "https://opendata.dwd.de/weather/lib/cdo/icon_grid_0047_R19B07_L.nc.bz2"
+
+# Must match etl.py GRID_NX / GRID_NY and CI workflow target_grid_world_0125.txt
+_TARGET_GRID_SPEC = """gridtype  = lonlat
+xsize     = 2879
+ysize     = 1441
+xfirst    = -180.0
+xinc      = 0.125
+yfirst    = 90.0
+yinc      = -0.125
+"""
 
 
-def ensure_easy_weights() -> tuple[Path, Path]:
-    """Download/cache DWD ICON_GLOBAL2WORLD_0125_EASY remap files (~50 MB once)."""
-    if _EASY_TARGET_GRID.is_file() and _EASY_WEIGHTS_NC.is_file():
-        return _EASY_TARGET_GRID, _EASY_WEIGHTS_NC
+def _stream_download(url: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with requests.get(url, stream=True, timeout=120) as resp:
+        resp.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1 << 20):
+                f.write(chunk)
 
-    print("Downloading ICON remap weights from DWD (~50 MB)…")
-    _EASY_CACHE.mkdir(parents=True, exist_ok=True)
-    resp = requests.get(DWD_EASY_WEIGHTS_URL, stream=True, timeout=120)
-    resp.raise_for_status()
-    archive = _EASY_CACHE / "weights.tar.bz2"
-    with open(archive, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=1 << 20):
-            f.write(chunk)
-    with tarfile.open(archive, "r:bz2") as tar:
-        tar.extractall(path=_EASY_CACHE)
-    archive.unlink()
-    if not _EASY_WEIGHTS_NC.is_file():
-        raise RuntimeError(f"Weights missing after extract: {_EASY_WEIGHTS_NC}")
-    print(f"  Cached at {_EASY_CACHE}\n")
-    return _EASY_TARGET_GRID, _EASY_WEIGHTS_NC
+
+def _download_sample_t2m_grib_bz2(run_date_yyyymmdd: str) -> bytes:
+    """
+    Same discovery order as .github/workflows (RUN_DATE × 4 cycles, then 15 days × 4).
+    Returns compressed .bz2 bytes.
+    """
+    urls: list[str] = []
+    for hh in ("18", "12", "06", "00"):
+        urls.append(
+            f"https://opendata.dwd.de/weather/nwp/icon/grib/{hh}/t_2m/"
+            f"icon_global_icosahedral_single-level_{run_date_yyyymmdd}{hh}_000_T_2M.grib2.bz2"
+        )
+    for days_ago in range(15):
+        d = (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y%m%d")
+        for hh in ("18", "12", "06", "00"):
+            u = (
+                f"https://opendata.dwd.de/weather/nwp/icon/grib/{hh}/t_2m/"
+                f"icon_global_icosahedral_single-level_{d}{hh}_000_T_2M.grib2.bz2"
+            )
+            if u not in urls:
+                urls.append(u)
+
+    last_exc: Exception | None = None
+    for url in urls:
+        try:
+            with requests.get(url, stream=True, timeout=120) as resp:
+                if resp.status_code != 200:
+                    continue
+                data = b"".join(resp.iter_content(chunk_size=1 << 20))
+            print(f"    Sample GRIB2: {url}")
+            return data
+        except requests.RequestException as exc:
+            last_exc = exc
+    raise RuntimeError(
+        "Could not download t_2m step-0 sample GRIB2 (.github/workflows search exhausted)"
+    ) from last_exc
+
+
+def _run_cdo(argv: list[str]) -> None:
+    r = subprocess.run(argv, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"CDO failed: {' '.join(argv)}\n{r.stderr}")
+
+
+def _run_cdo_shell(cmd: str) -> None:
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"CDO failed: {cmd}\n{r.stderr}")
+
+
+def ensure_ci_style_remap_weights(param: str, run_dt: str) -> tuple[Path, Path]:
+    """
+    Build or reuse cached weights_distance.nc + weights_conservative.nc (same logic as CI).
+    ``run_dt`` is YYYYMMDDHH from resolve_available_run; sample GRIB2 uses the same
+    cycle as the test data (grib/{hh}/…_{run_dt}_000_…) so the file exists when the run does.
+
+    Returns (target_grid_world_0125.txt path, weights file path for ``param``).
+    """
+    cache = _REMAP_CACHE
+    cache.mkdir(parents=True, exist_ok=True)
+    target = cache / "target_grid_world_0125.txt"
+    icon_nc = cache / "icon_grid_R19B07_L.nc"
+    sample_grib = cache / "sample.grib2"
+    w_dist = cache / "weights_distance.nc"
+    w_con = cache / "weights_conservative.nc"
+    weights_for_param = cache / WEIGHTS_MAP.get(param, "weights_distance.nc")
+
+    if target.is_file() and w_dist.is_file() and w_con.is_file():
+        print(f"  Using cached remap weights under {cache}\n")
+        return target, weights_for_param
+
+    print("=" * 40)
+    print("Remap assets (mirror CI workflow)")
+    print("=" * 40)
+
+    print("  [1/4] Download native grid …")
+    bz_path = cache / "icon_grid.nc.bz2"
+    _stream_download(_ICON_GRID_URL, bz_path)
+    raw = bz2.decompress(bz_path.read_bytes())
+    icon_nc.write_bytes(raw)
+    bz_path.unlink(missing_ok=True)
+
+    run_date = run_dt[:8]
+    print(f"  [2/4] Download sample GRIB2 template (t_2m step 0; try {run_date}×4h then 15d×4h) …")
+    sample_bz_bytes = _download_sample_t2m_grib_bz2(run_date)
+    sample_grib.write_bytes(bz2.decompress(sample_bz_bytes))
+
+    print("  [3/4] Write target_grid_world_0125.txt …")
+    target.write_text(_TARGET_GRID_SPEC)
+
+    print("  [4/4] cdo gendis + genycon …")
+    # Same as .github/workflows/main.yml: pass raw GRIB2 (not cfgrib NetCDF — breaks gendis).
+    tg, ic, sg, wd, wc = (str(p) for p in (target, icon_nc, sample_grib, w_dist, w_con))
+    try:
+        _run_cdo_shell(f'cdo -O gendis,"{tg}" -setgrid,"{ic}" "{sg}" "{wd}"')
+        _run_cdo_shell(f'cdo -O genycon,"{tg}" -setgrid,"{ic}" "{sg}" "{wc}"')
+    except RuntimeError as exc:
+        print("  ! -setgrid + icon NC failed (grid cell mismatch?). Retrying with GRIB2 only.")
+        print(f"    ({exc})")
+        _run_cdo_shell(f'cdo -O gendis,"{tg}" "{sg}" "{wd}"')
+        _run_cdo_shell(f'cdo -O genycon,"{tg}" "{sg}" "{wc}"')
+
+    icon_nc.unlink(missing_ok=True)
+    sample_grib.unlink(missing_ok=True)
+    print(f"  Done. Cache: {cache}\n")
+
+    return target, weights_for_param
 
 
 def encoding_with_chunks(ds: xr.Dataset, chunk_spec: dict[str, int]) -> dict:
@@ -85,7 +189,7 @@ def main():
     print("=" * 60)
     print("STEP 2: Download → Decompress → Regrid")
     print("=" * 60)
-    easy_tg, easy_w = ensure_easy_weights()
+    target_grid, weights_nc = ensure_ci_style_remap_weights(PARAM, run_dt)
     step_datasets = []
     for step in TEST_STEPS:
         urls = build_urls(MODEL, run_dt, PARAM, step)
@@ -99,7 +203,7 @@ def main():
 
         print(f"  Regridding step {step} via CDO remapdis...")
         ds = regrid_grib_bytes(
-            raw, PARAM, remap_target_grid=easy_tg, remap_weights=easy_w
+            raw, PARAM, remap_target_grid=target_grid, remap_weights=weights_nc
         )
         print(f"    Dimensions: {dict(ds.sizes)}")
         print(f"    Variables: {list(ds.data_vars)}")

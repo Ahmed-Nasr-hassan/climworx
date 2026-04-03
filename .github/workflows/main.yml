@@ -119,6 +119,8 @@ jobs:
             netCDF4
 
       - name: Build CDO remap assets (DWD native grid → weights)
+        env:
+          RUN_DATE: ${{ needs.resolve-run.outputs.run_date }}
         run: |
           set -euo pipefail
           ASSETS="${GITHUB_WORKSPACE}/assets"
@@ -132,11 +134,40 @@ jobs:
           mv /tmp/icon_grid.nc "$ASSETS/icon_grid_R19B07_L.nc"
           echo "::endgroup::"
 
-          # 2. Download a tiny GRIB2 sample from yesterday (guaranteed to exist) to use as a data template
-          YESTERDAY=$(date -u -d "yesterday" +%Y%m%d)
-          SAMPLE_URL="https://opendata.dwd.de/weather/nwp/icon/grib/00/t_2m/icon_global_icosahedral_single-level_${YESTERDAY}00_000_T_2M.grib2.bz2"
+          # 2. Download a small GRIB2 sample (t_2m step 0) as CDO data template.
+          # Path hour and filename run stamp must match (grib/HH/..._YYYYMMDDHH_000_...).
+          # Try workflow RUN_DATE first, then scan recent days × all cycles (yesterday alone often 404s).
           echo "::group::Download sample GRIB2 template"
-          curl -fsSL -o /tmp/sample.grib2.bz2 "$SAMPLE_URL"
+          got=0
+          if [ -n "${RUN_DATE:-}" ]; then
+            for hh in 18 12 06 00; do
+              URL="https://opendata.dwd.de/weather/nwp/icon/grib/${hh}/t_2m/icon_global_icosahedral_single-level_${RUN_DATE}${hh}_000_T_2M.grib2.bz2"
+              echo "Trying: $URL"
+              if curl -fsSL -o /tmp/sample.grib2.bz2 "$URL"; then
+                got=1
+                echo "OK: $URL"
+                break
+              fi
+            done
+          fi
+          if [ "$got" -ne 1 ]; then
+            for days_ago in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+              D=$(date -u -d "$days_ago days ago" +%Y%m%d)
+              for hh in 18 12 06 00; do
+                URL="https://opendata.dwd.de/weather/nwp/icon/grib/${hh}/t_2m/icon_global_icosahedral_single-level_${D}${hh}_000_T_2M.grib2.bz2"
+                echo "Trying: $URL"
+                if curl -fsSL -o /tmp/sample.grib2.bz2 "$URL"; then
+                  got=1
+                  echo "OK: $URL"
+                  break 2
+                fi
+              done
+            done
+          fi
+          if [ "$got" -ne 1 ]; then
+            echo "::error::Could not download any t_2m step-0 sample GRIB2 (RUN_DATE + last 15 days × 4 cycles)."
+            exit 1
+          fi
           bunzip2 -f /tmp/sample.grib2.bz2
           echo "::endgroup::"
 
