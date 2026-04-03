@@ -1,0 +1,233 @@
+name: ICON Global Weather ETL
+
+on:
+  schedule:
+    # 4 daily runs aligned with DWD model release schedule (~2h after init)
+    - cron: "15 2  * * *"   # 00Z model run
+    - cron: "15 8  * * *"   # 06Z model run
+    - cron: "15 14 * * *"   # 12Z model run
+    - cron: "15 20 * * *"   # 18Z model run
+  workflow_dispatch:
+    inputs:
+      model_run:
+        description: "Force a specific model run (00/06/12/18)"
+        required: false
+        default: ""
+      run_date:
+        description: "Override date YYYYMMDD (default: today UTC)"
+        required: false
+        default: ""
+      enable_ensemble:
+        description: "Process ensemble members (true/false)"
+        required: false
+        default: "false"
+
+# ---------------------------------------------------------------------------
+# Global env — secrets injected here
+# ---------------------------------------------------------------------------
+env:
+  CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
+  R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+  R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+  ALERT_WEBHOOK_URL:    ${{ secrets.ALERT_WEBHOOK_URL }}
+  ENABLE_ENSEMBLE:      ${{ github.event.inputs.enable_ensemble || 'false' }}
+  KEEP_RUNS:            "2"
+  PYTHON_VERSION:       "3.11"
+
+# ---------------------------------------------------------------------------
+# Concurrency: one ETL group per MODEL_RUN; never cancel in-progress jobs
+# ---------------------------------------------------------------------------
+concurrency:
+  group: icon-etl-${{ github.event.inputs.model_run || 'auto' }}-${{ github.event.inputs.run_date || 'today' }}
+  cancel-in-progress: false
+
+jobs:
+  # =========================================================================
+  # Job 0: Resolve model run (00/06/12/18) from wall-clock UTC hour
+  # =========================================================================
+  resolve-run:
+    name: Resolve model run
+    runs-on: ubuntu-latest
+    outputs:
+      model_run: ${{ steps.detect.outputs.MODEL_RUN }}
+      run_date:  ${{ steps.detect.outputs.RUN_DATE }}
+    steps:
+      - name: Detect model run from UTC hour
+        id: detect
+        run: |
+          if [ -n "${{ github.event.inputs.model_run }}" ]; then
+            MODEL_RUN="${{ github.event.inputs.model_run }}"
+          else
+            HOUR=$(date -u +%H)
+            if   [ "$HOUR" -lt 6  ]; then MODEL_RUN="00"
+            elif [ "$HOUR" -lt 12 ]; then MODEL_RUN="06"
+            elif [ "$HOUR" -lt 18 ]; then MODEL_RUN="12"
+            else                          MODEL_RUN="18"
+            fi
+          fi
+
+          if [ -n "${{ github.event.inputs.run_date }}" ]; then
+            RUN_DATE="${{ github.event.inputs.run_date }}"
+          else
+            RUN_DATE=$(date -u +%Y%m%d)
+          fi
+
+          echo "MODEL_RUN=$MODEL_RUN" >> "$GITHUB_OUTPUT"
+          echo "RUN_DATE=$RUN_DATE"   >> "$GITHUB_OUTPUT"
+          echo "Resolved: MODEL_RUN=$MODEL_RUN  RUN_DATE=$RUN_DATE"
+
+  # =========================================================================
+  # Job 1: ETL — runs in parallel across all parameters (matrix)
+  # =========================================================================
+  etl:
+    name: "ETL · ${{ matrix.parameter }} · ${{ needs.resolve-run.outputs.model_run }}Z"
+    needs: resolve-run
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        parameter:
+          - t_2m
+          - tot_prec
+          - u_10m
+          - v_10m
+          - pmsl
+          - clct
+          - relhum_2m
+          - aswdir_s
+      fail-fast: false   # Continue other parameters if one fails
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install CDO
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cdo
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            xarray \
+            cfgrib \
+            zarr \
+            s3fs \
+            blosc \
+            numpy \
+            requests \
+            netCDF4
+
+      - name: Run ETL (download → regrid → stage)
+        env:
+          PARAMETER:   ${{ matrix.parameter }}
+          MODEL_RUN:   ${{ needs.resolve-run.outputs.model_run }}
+          RUN_DATE:    ${{ needs.resolve-run.outputs.run_date }}
+        run: |
+          START=$(date -u +%s)
+          echo "::group::ETL start — param=$PARAMETER run=${RUN_DATE}${MODEL_RUN}"
+
+          python etl.py \
+            --parameter "$PARAMETER" \
+            --model-run "$MODEL_RUN" \
+            --run-date  "$RUN_DATE"  \
+            ${{ env.ENABLE_ENSEMBLE == 'true' && '--ensemble' || '' }}
+
+          END=$(date -u +%s)
+          echo "::endgroup::"
+          echo "Duration: $((END - START))s"
+
+      - name: Upload ETL log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: etl-log-${{ matrix.parameter }}-${{ needs.resolve-run.outputs.model_run }}
+          path: "*.log"
+          if-no-files-found: ignore
+
+  # =========================================================================
+  # Job 2: Validate + Promote + Janitor (runs after ALL matrix jobs succeed)
+  # =========================================================================
+  promote:
+    name: "Validate · Promote · Janitor · ${{ needs.resolve-run.outputs.model_run }}Z"
+    needs:
+      - resolve-run
+      - etl
+    runs-on: ubuntu-latest
+    # Run even if some matrix jobs failed so we can send a clear failure alert
+    if: always()
+
+    steps:
+      - name: Check all ETL jobs succeeded
+        run: |
+          if [ "${{ needs.etl.result }}" != "success" ]; then
+            echo "::error::One or more ETL parameter jobs failed. Aborting promotion."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install xarray zarr s3fs numpy requests netCDF4
+
+      - name: Validate + Promote + Janitor
+        env:
+          MODEL_RUN: ${{ needs.resolve-run.outputs.model_run }}
+          RUN_DATE:  ${{ needs.resolve-run.outputs.run_date }}
+        run: |
+          START=$(date -u +%s)
+          echo "::group::Validation & Promotion — run=${RUN_DATE}${MODEL_RUN}"
+
+          python etl.py \
+            --model-run "$MODEL_RUN" \
+            --run-date  "$RUN_DATE"  \
+            --keep-runs "$KEEP_RUNS" \
+            --validate-only \
+            --params t_2m tot_prec u_10m v_10m pmsl clct relhum_2m aswdir_s \
+            ${{ env.ENABLE_ENSEMBLE == 'true' && '--ensemble' || '' }}
+
+          END=$(date -u +%s)
+          echo "::endgroup::"
+          echo "Validation + Promotion duration: $((END - START))s"
+
+      - name: Alert on validation/promotion failure
+        if: failure()
+        env:
+          MODEL_RUN: ${{ needs.resolve-run.outputs.model_run }}
+          RUN_DATE:  ${{ needs.resolve-run.outputs.run_date }}
+        run: |
+          MESSAGE="ICON ETL FAILED | run=${RUN_DATE}${MODEL_RUN} | step=validate/promote | repo=${{ github.repository }} | run_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "$ALERT_WEBHOOK_URL" \
+               -H "Content-Type: application/json" \
+               -d "{\"text\": \"$MESSAGE\"}" || true
+
+      - name: Summary
+        if: success()
+        env:
+          MODEL_RUN: ${{ needs.resolve-run.outputs.model_run }}
+          RUN_DATE:  ${{ needs.resolve-run.outputs.run_date }}
+        run: |
+          echo "### ETL Pipeline Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Run | \`${RUN_DATE}${MODEL_RUN}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameters | t_2m, tot_prec, u_10m, v_10m, pmsl, clct, relhum_2m, aswdir_s |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Ensemble | ${{ env.ENABLE_ENSEMBLE }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Status | ✅ Promoted to /runs/ and /latest/ updated |" >> "$GITHUB_STEP_SUMMARY"
