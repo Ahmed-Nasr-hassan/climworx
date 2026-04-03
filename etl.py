@@ -73,11 +73,6 @@ RETRY_BASE_S = 30
 RETRY_MAX_S = 300
 BUCKET = "icon-global-databank"
 
-# Deterministic forecast steps: +0..+78 hourly, +81..+180 every 3h
-STEPS_SHORT = list(range(0, 79))           # 0–78 inclusive
-STEPS_EXTENDED = list(range(81, 181, 3))   # 81, 84, ..., 180
-ALL_STEPS = STEPS_SHORT + STEPS_EXTENDED   # 97 steps total
-
 # Physical plausibility bounds per parameter (min, max)
 PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "t_2m":      (180.0, 340.0),   # K
@@ -89,6 +84,20 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "relhum_2m": (0.0, 110.0),     # % (allow slight super-saturation)
     "aswdir_s":  (0.0, 1500.0),    # W/m²
 }
+
+
+def get_all_steps(model_run: str) -> list[int]:
+    """
+    Forecast step indices for ICON Global deterministic GRIB2 on DWD.
+
+    00Z and 12Z runs extend to +180 h; 06Z and 18Z only to +120 h.
+    Steps: +0..+78 hourly, then +81..+max every 3 h.
+    """
+    max_step = 120 if model_run in ("06", "18") else 180
+    steps_short = list(range(0, 79))
+    steps_extended = list(range(81, max_step + 1, 3))
+    return steps_short + steps_extended
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -229,6 +238,21 @@ def stream_download(url: str) -> bytes:
     """Stream-download a .bz2 file and return decompressed bytes."""
     log.debug("Downloading %s", url)
     with requests.get(url, stream=True, timeout=120) as resp:
+        resp.raise_for_status()
+        compressed = b"".join(resp.iter_content(chunk_size=1 << 20))
+    return bz2.decompress(compressed)
+
+
+def try_stream_download(url: str) -> bytes | None:
+    """
+    Like stream_download, but return None on HTTP 404 (file not on DWD).
+    Raises on other HTTP errors and on network failures (for use with with_retry).
+    """
+    log.debug("Downloading %s", url)
+    with requests.get(url, stream=True, timeout=120) as resp:
+        if resp.status_code == 404:
+            log.warning("DWD 404 — skipping step file: %s", url)
+            return None
         resp.raise_for_status()
         compressed = b"".join(resp.iter_content(chunk_size=1 << 20))
     return bz2.decompress(compressed)
@@ -381,6 +405,7 @@ def process_deterministic(
     run_dt: str,
     param: str,
     fs: s3fs.S3FileSystem,
+    all_steps: list[int],
 ) -> xr.Dataset:
     """
     Download + regrid all forecast steps for a deterministic (ICON Global) run.
@@ -388,19 +413,27 @@ def process_deterministic(
     """
     step_datasets: list[xr.Dataset] = []
 
-    for step in ALL_STEPS:
+    for step in all_steps:
         urls = build_urls("icon", run_dt, param, step)
         url = urls[0]
 
         def _fetch_and_regrid(u=url, p=param, s=step):
-            raw = stream_download(u)
+            raw = try_stream_download(u)
+            if raw is None:
+                return None
             ds = regrid_grib_bytes(raw, p)
-            ds = ds.expand_dims({"step": [s]})
-            return ds
+            return ds.expand_dims({"step": [s]})
 
         ds_step = with_retry(_fetch_and_regrid, label=f"{param}/step={step}")
+        if ds_step is None:
+            continue
         step_datasets.append(ds_step)
         log.info("  [det] %s step=%d regridded (%d vars)", param, step, len(ds_step.data_vars))
+
+    if not step_datasets:
+        raise RuntimeError(
+            f"[det] {param} run={run_dt}: no forecast steps downloaded (all missing on DWD?)"
+        )
 
     return xr.concat(step_datasets, dim="step")
 
@@ -409,31 +442,47 @@ def process_ensemble(
     run_dt: str,
     param: str,
     fs: s3fs.S3FileSystem,
+    all_steps: list[int],
 ) -> xr.Dataset:
     """
     Download + regrid all 40 ensemble members across all forecast steps.
     Returns an xr.Dataset with dimensions (step, realization, latitude, longitude).
     """
     member_datasets: list[xr.Dataset] = []
+    member_step_lists: list[list[xr.Dataset]] = [[] for _ in range(ENSEMBLE_MEMBERS)]
 
-    for member_idx in range(ENSEMBLE_MEMBERS):
-        step_datasets: list[xr.Dataset] = []
-        for step in ALL_STEPS:
-            urls = build_urls("icon-eps", run_dt, param, step)
-            url = urls[member_idx]
+    for step in all_steps:
+        urls = build_urls("icon-eps", run_dt, param, step)
+        first_raw = try_stream_download(urls[0])
+        if first_raw is None:
+            log.warning(
+                "  [eps] %s step=%d — not on DWD, skipping for all members", param, step
+            )
+            continue
 
-            def _fetch(u=url, p=param, s=step):
-                raw = stream_download(u)
-                ds = regrid_grib_bytes(raw, p)
-                return ds.expand_dims({"step": [s]})
+        for member_idx in range(ENSEMBLE_MEMBERS):
+            url_m = urls[member_idx]
+            fr = first_raw
+            mid = member_idx
 
-            ds_step = with_retry(_fetch, label=f"eps/{param}/mbr={member_idx}/step={step}")
-            step_datasets.append(ds_step)
+            def _fetch(u=url_m, p=param, s=step, first=fr, m=mid):
+                raw = first if m == 0 else stream_download(u)
+                return regrid_grib_bytes(raw, p).expand_dims({"step": [s]})
 
+            ds_step = with_retry(
+                _fetch, label=f"eps/{param}/mbr={member_idx}/step={step}"
+            )
+            member_step_lists[member_idx].append(ds_step)
+
+    for member_idx, step_datasets in enumerate(member_step_lists):
+        if not step_datasets:
+            raise RuntimeError(
+                f"[eps] {param} run={run_dt}: no steps for member {member_idx}"
+            )
         ds_member = xr.concat(step_datasets, dim="step")
         ds_member = ds_member.expand_dims({"realization": [member_idx]})
         member_datasets.append(ds_member)
-        log.info("  [eps] %s member=%d complete", param, member_idx)
+        log.info("  [eps] %s member=%d complete (%d steps)", param, member_idx, len(step_datasets))
 
     return xr.concat(member_datasets, dim="realization")
 
@@ -470,7 +519,13 @@ def upload_to_staging(
 # ---------------------------------------------------------------------------
 
 
-def validate_run(run_dt: str, params: list[str], ensemble: bool, fs: s3fs.S3FileSystem) -> None:
+def validate_run(
+    run_dt: str,
+    params: list[str],
+    ensemble: bool,
+    fs: s3fs.S3FileSystem,
+    all_steps: list[int],
+) -> None:
     """
     Validate the complete staged run.
     Raises ValueError with a descriptive message on any failure.
@@ -491,12 +546,21 @@ def validate_run(run_dt: str, params: list[str], ensemble: bool, fs: s3fs.S3File
         if "step" not in ds.coords:
             raise ValueError(f"[{param}] 'step' coordinate not found in Zarr store")
         actual_steps = set(int(s) for s in ds.coords["step"].values)
-        expected_steps = set(ALL_STEPS)
+        expected_steps = set(all_steps)
+        unexpected = actual_steps - expected_steps
+        if unexpected:
+            raise ValueError(
+                f"[{param}] Zarr contains steps not in catalog for this run: "
+                f"{sorted(unexpected)[:15]}{'…' if len(unexpected) > 15 else ''}"
+            )
         missing = expected_steps - actual_steps
         if missing:
-            raise ValueError(
-                f"[{param}] Missing {len(missing)} forecast steps: "
-                f"{sorted(missing)[:10]}{'…' if len(missing) > 10 else ''}"
+            log.warning(
+                "[%s] %d forecast steps absent from Zarr (skipped on DWD): %s%s",
+                param,
+                len(missing),
+                sorted(missing)[:15],
+                "…" if len(missing) > 15 else "",
             )
 
         # 3. Non-empty arrays + plausibility bounds
@@ -530,9 +594,14 @@ def validate_run(run_dt: str, params: list[str], ensemble: bool, fs: s3fs.S3File
         if not fs.exists(marker):
             raise ValueError(f"[{param}] _SUCCESS marker missing at {marker}")
 
-        log.info("  [OK] %s — %d steps, %d data vars%s",
-                 param, len(ALL_STEPS), len(ds.data_vars),
-                 f", {ENSEMBLE_MEMBERS} members" if ensemble else "")
+        log.info(
+            "  [OK] %s — %d/%d steps in Zarr, %d data vars%s",
+            param,
+            len(actual_steps),
+            len(all_steps),
+            len(ds.data_vars),
+            f", {ENSEMBLE_MEMBERS} members" if ensemble else "",
+        )
 
     log.info("=== Validation PASSED ===")
 
@@ -578,7 +647,27 @@ def build_spatial_index(run_dt: str, params: list[str], fs: s3fs.S3FileSystem) -
     """
     Write spatial_index.json describing chunk layout for the Worker.
     This is a small JSON that the CF Worker loads to resolve lat/lon → chunk.
+    ``steps`` are taken from the first readable promoted Zarr (matches skipped DWD steps).
     """
+    steps_in_store: list[int] = []
+    for ref_param in params:
+        try:
+            store = s3fs.S3Map(
+                root=f"{BUCKET}/runs/{run_dt}/{ref_param}", s3=fs, check=False
+            )
+            ds_ref = xr.open_zarr(store, consolidated=True)
+            if "step" in ds_ref.coords:
+                steps_in_store = [int(s) for s in ds_ref.coords["step"].values]
+            ds_ref.close()
+            if steps_in_store:
+                break
+        except Exception as exc:
+            log.debug("spatial_index: skip ref %s: %s", ref_param, exc)
+    if not steps_in_store:
+        raise ValueError(
+            f"Cannot build spatial_index: no step coordinate found under runs/{run_dt}/"
+        )
+
     index = {
         "run": run_dt,
         "grid": {
@@ -589,7 +678,7 @@ def build_spatial_index(run_dt: str, params: list[str], fs: s3fs.S3FileSystem) -
         },
         "chunks": {"latitude": CHUNK_LAT, "longitude": CHUNK_LON},
         "params": params,
-        "steps": ALL_STEPS,
+        "steps": steps_in_store,
     }
     key = f"{BUCKET}/spatial_index.json"
     with fs.open(key, "w") as f:
@@ -695,6 +784,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    all_steps = get_all_steps(args.model_run)
 
     # Build run datetime string YYYYMMDDHH
     if args.run_date:
@@ -723,13 +813,14 @@ def main() -> None:
         if resolved_run_dt != run_dt:
             log.info("Resolved run_dt: %s → %s", run_dt, resolved_run_dt)
             run_dt = resolved_run_dt
+            all_steps = get_all_steps(run_dt[8:10])
 
         try:
             t0 = time.monotonic()
             if ensemble:
-                ds = process_ensemble(run_dt, param, fs)
+                ds = process_ensemble(run_dt, param, fs, all_steps)
             else:
-                ds = process_deterministic(run_dt, param, fs)
+                ds = process_deterministic(run_dt, param, fs, all_steps)
 
             staging_path = upload_to_staging(ds, run_dt, param, ensemble, fs)
             elapsed = time.monotonic() - t0
@@ -750,8 +841,15 @@ def main() -> None:
     if args.validate_only:
         all_params = args.params or list(PARAM_BOUNDS.keys())
         try:
-            with_retry(validate_run, run_dt, all_params, ensemble, fs,
-                       label="validation")
+            with_retry(
+                validate_run,
+                run_dt,
+                all_params,
+                ensemble,
+                fs,
+                all_steps,
+                label="validation",
+            )
         except Exception as exc:
             msg = f"VALIDATION FAILED | run={run_dt} | error={exc}"
             log.exception(msg)
