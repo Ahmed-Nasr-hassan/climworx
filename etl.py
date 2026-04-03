@@ -270,7 +270,7 @@ def regrid_grib_bytes(grib_bytes: bytes, param: str) -> xr.Dataset:
         cmd = [
             "cdo",
             "-f", "nc4",
-            f"remapbil,{grid_file}",
+            f"remapdis,{grid_file}",
             str(src),
             str(dst),
         ]
