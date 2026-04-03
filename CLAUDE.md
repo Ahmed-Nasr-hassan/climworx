@@ -10,7 +10,7 @@ ClimWorx is a serverless weather data pipeline that fetches ICON Global / ICON-E
 
 ```bash
 # Install Python dependencies
-pip install xarray cfgrib zarr s3fs numpy requests netCDF4 blosc
+pip install xarray cfgrib zarr s3fs numpy requests netCDF4 numcodecs
 
 # System dependency (required for regridding)
 apt-get install cdo  # CDO >= 2.0
@@ -88,11 +88,11 @@ icon-global-databank/
 
 Request flow: rate limit check (100 req/min per IP via KV) → validate params → resolve run ID → convert lat/lon to chunk index via `latLonToChunkIndex()` → check Cloudflare Cache API (1h TTL) → byte-range read from R2 → decompress Blosc chunk → extract time series → return JSON.
 
-**Known limitation:** Blosc decompression in the Worker is a placeholder. Production options: bundle `numcodecs-wasm`, or switch the ETL compressor to gzip (natively supported in Workers).
+**Blosc decompression:** The Worker requires a WASM Blosc decoder (e.g. `numcodecs-wasm` or `blosc-wasm`). Register it at startup via `registerBloscDecoder()` exported from `index.ts`. Without it, chunk fetches fail with a descriptive error.
 
 ### Data Constants
 
-- **Grid:** 2880×1441 (0.125° resolution, north→south, west→east)
+- **Grid:** 2880×1441 (0.125° resolution, north→south, west→east; xfirst=-180.0, yfirst=-90.0 in CDO, flipped to N→S in Zarr)
 - **Forecast steps:** 97 total (+0…+78h hourly, +81…+180h every 3h)
 - **Parameters:** `t_2m`, `tot_prec`, `u_10m`, `v_10m`, `pmsl`, `clct`, `relhum_2m`, `aswdir_s`
 - **Chunk size:** 100×100 lat/lon pixels, full step dimension (≈1.8 MB per chunk)

@@ -120,7 +120,7 @@ jobs:
             cfgrib \
             zarr \
             s3fs \
-            blosc \
+            numcodecs \
             numpy \
             requests \
             netCDF4
@@ -134,11 +134,16 @@ jobs:
           START=$(date -u +%s)
           echo "::group::ETL start — param=$PARAMETER run=${RUN_DATE}${MODEL_RUN}"
 
+          ENSEMBLE_FLAG=""
+          if [ "$ENABLE_ENSEMBLE" = "true" ]; then
+            ENSEMBLE_FLAG="--ensemble"
+          fi
+
           python etl.py \
             --parameter "$PARAMETER" \
             --model-run "$MODEL_RUN" \
             --run-date  "$RUN_DATE"  \
-            ${{ env.ENABLE_ENSEMBLE == 'true' && '--ensemble' || '' }}
+            $ENSEMBLE_FLAG
 
           END=$(date -u +%s)
           echo "::endgroup::"
@@ -184,7 +189,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install xarray zarr s3fs numpy requests netCDF4
+          pip install xarray zarr s3fs numcodecs numpy requests netCDF4
 
       - name: Validate + Promote + Janitor
         env:
@@ -194,13 +199,18 @@ jobs:
           START=$(date -u +%s)
           echo "::group::Validation & Promotion — run=${RUN_DATE}${MODEL_RUN}"
 
+          ENSEMBLE_FLAG=""
+          if [ "$ENABLE_ENSEMBLE" = "true" ]; then
+            ENSEMBLE_FLAG="--ensemble"
+          fi
+
           python etl.py \
             --model-run "$MODEL_RUN" \
             --run-date  "$RUN_DATE"  \
             --keep-runs "$KEEP_RUNS" \
             --validate-only \
             --params t_2m tot_prec u_10m v_10m pmsl clct relhum_2m aswdir_s \
-            ${{ env.ENABLE_ENSEMBLE == 'true' && '--ensemble' || '' }}
+            $ENSEMBLE_FLAG
 
           END=$(date -u +%s)
           echo "::endgroup::"

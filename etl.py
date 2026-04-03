@@ -42,7 +42,7 @@ import requests
 import s3fs
 import xarray as xr
 import zarr
-from zarr.codecs import BloscCodec
+from numcodecs import Blosc
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -194,7 +194,7 @@ def _write_target_grid(path: Path) -> None:
         "gridtype  = lonlat\n"
         f"xsize     = {GRID_NX}\n"
         f"ysize     = {GRID_NY}\n"
-        "xfirst    = -179.9375\n"
+        "xfirst    = -180.0\n"
         "xinc      = 0.125\n"
         "yfirst    = -90.0\n"
         "yinc      = 0.125\n"
@@ -231,6 +231,19 @@ def regrid_grib_bytes(grib_bytes: bytes, param: str) -> xr.Dataset:
 
         ds = xr.open_dataset(dst, engine="netcdf4").load()
 
+    # Normalize dimension names to match Zarr/Worker conventions
+    rename_map: dict[str, str] = {}
+    if "lat" in ds.dims and "latitude" not in ds.dims:
+        rename_map["lat"] = "latitude"
+    if "lon" in ds.dims and "longitude" not in ds.dims:
+        rename_map["lon"] = "longitude"
+    if rename_map:
+        ds = ds.rename(rename_map)
+
+    # Ensure north-to-south latitude ordering (Worker expects index 0 = 90°N)
+    if "latitude" in ds.coords and ds.latitude.values[0] < ds.latitude.values[-1]:
+        ds = ds.reindex(latitude=ds.latitude[::-1])
+
     return ds
 
 
@@ -240,7 +253,7 @@ def regrid_grib_bytes(grib_bytes: bytes, param: str) -> xr.Dataset:
 
 
 def make_encoding(ds: xr.Dataset) -> dict[str, Any]:
-    compressor = zarr.Blosc(cname="zstd", clevel=3, shuffle=zarr.Blosc.BITSHUFFLE)
+    compressor = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
     return {var: {"compressor": compressor} for var in ds.data_vars}
 
 
@@ -371,8 +384,9 @@ def validate_run(run_dt: str, params: list[str], ensemble: bool, fs: s3fs.S3File
             raise ValueError(f"[{param}] Cannot open Zarr store: {exc}") from exc
 
         # 2. Step completeness
-        actual_steps = set(ds.coords.get("step", ds.dims.get("step", [])).values.tolist()
-                           if hasattr(ds.coords.get("step", None), "values") else [])
+        if "step" not in ds.coords:
+            raise ValueError(f"[{param}] 'step' coordinate not found in Zarr store")
+        actual_steps = set(int(s) for s in ds.coords["step"].values)
         expected_steps = set(ALL_STEPS)
         missing = expected_steps - actual_steps
         if missing:
@@ -382,15 +396,17 @@ def validate_run(run_dt: str, params: list[str], ensemble: bool, fs: s3fs.S3File
             )
 
         # 3. Non-empty arrays + plausibility bounds
+        #    Use dask-aware operations to avoid loading entire arrays into RAM
+        #    (a single parameter can be ~1.6 GB as float32).
         bounds = PARAM_BOUNDS.get(param)
         for var in ds.data_vars:
-            arr = ds[var].values
-            if arr.size == 0:
+            if ds[var].size == 0:
                 raise ValueError(f"[{param}/{var}] Data array is empty")
-            if np.all(np.isnan(arr)):
+            if bool(ds[var].isnull().all().compute()):
                 raise ValueError(f"[{param}/{var}] All-NaN array")
             if bounds is not None:
-                vmin, vmax = float(np.nanmin(arr)), float(np.nanmax(arr))
+                vmin = float(ds[var].min().compute())
+                vmax = float(ds[var].max().compute())
                 if vmin < bounds[0] or vmax > bounds[1]:
                     raise ValueError(
                         f"[{param}/{var}] Values out of plausible range "

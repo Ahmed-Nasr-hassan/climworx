@@ -232,49 +232,73 @@ function buildChunkKey(
 }
 
 /**
- * Minimal Blosc header parser.
- * Blosc frame: 16-byte header → uncompressed size at bytes 4–7 (LE uint32).
- * The Worker uses DecompressionStream('deflate-raw') for the inner codec (zstd
- * is not natively available in Workers; we rely on Blosc's "noshuffle" fallback
- * or pre-decompress on the ETL side with gzip for Worker compatibility).
+ * Blosc frame header (16 bytes):
+ *   [0]    version
+ *   [1]    versionlz  — internal compressor version
+ *   [2]    flags      — bits 5-7 encode the compressor id
+ *   [3]    typesize   — element size used for shuffle
+ *   [4-7]  nbytes     — uncompressed size  (LE uint32)
+ *   [8-11] blocksize  — internal block size (LE uint32)
+ *   [12-15] cbytes    — total compressed size incl. header (LE uint32)
  *
- * NOTE: Full Blosc decompression inside a CF Worker requires a WASM port of
- * blosc (e.g., numcodecs-wasm). For production, either:
- *   (a) Use a WASM build of blosc, or
- *   (b) Store chunks with gzip compressor (Workers have native DecompressionStream).
+ * Compressor IDs (flags >> 5): 0=blosclz, 1=lz4, 2=lz4hc, 4=zlib, 5=zstd
  *
- * The implementation below demonstrates the pattern; swap `decompressChunk`
- * for your chosen approach.
+ * Production deployment requires a WASM Blosc decoder (e.g. numcodecs-wasm,
+ * @aspect-build/aspect-blosc). The function below parses the header and
+ * delegates to a WASM decoder. Install a suitable package and update the
+ * import below:
+ *
+ *   import { bloscDecompress } from 'blosc-wasm';
  */
-async function decompressChunk(compressed: ArrayBuffer): Promise<Float32Array> {
-  // Blosc header is 16 bytes; skip it and try to decompress remaining bytes.
-  // This is a simplified placeholder — replace with a proper WASM blosc decoder.
-  const view = new DataView(compressed);
-  const uncompressedSize = view.getUint32(4, true); // bytes 4-7, little-endian
 
-  // For zstd-compressed Blosc data inside a Worker we use a WASM decompressor.
-  // Here we return a typed array of the expected size filled from raw bytes
-  // as a structural placeholder (real decoding requires WASM or a side-car).
-  const raw = new Uint8Array(compressed, 16); // skip 16-byte Blosc frame header
-  const ds = new DecompressionStream("deflate-raw");
-  const writer = ds.writable.getWriter();
-  writer.write(raw);
-  writer.close();
-  const reader = ds.readable.getReader();
-  const chunks: Uint8Array[] = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
+// Placeholder — replace with a real WASM Blosc decoder import.
+// e.g.: import { decompress as bloscDecompress } from 'blosc-wasm';
+let bloscWasmDecompress: ((buf: Uint8Array) => Uint8Array) | null = null;
+
+/**
+ * Register an external WASM-based Blosc decompressor at Worker startup.
+ * Call this once from a module-level init or from the fetch handler before
+ * first use:
+ *   import { decompress } from 'blosc-wasm';
+ *   registerBloscDecoder(decompress);
+ */
+export function registerBloscDecoder(fn: (buf: Uint8Array) => Uint8Array): void {
+  bloscWasmDecompress = fn;
+}
+
+async function decompressChunk(compressed: ArrayBuffer): Promise<Float32Array> {
+  const header = new DataView(compressed);
+  const nbytes = header.getUint32(4, true);   // uncompressed size in bytes
+  const cbytes = header.getUint32(12, true);   // compressed size incl. header
+
+  if (compressed.byteLength < cbytes) {
+    throw new Error(
+      `Blosc frame truncated: expected ${cbytes} bytes, got ${compressed.byteLength}`,
+    );
   }
-  const totalLen = chunks.reduce((s, c) => s + c.byteLength, 0);
-  const buf = new Uint8Array(totalLen);
-  let offset = 0;
-  for (const c of chunks) {
-    buf.set(c, offset);
-    offset += c.byteLength;
+
+  // Delegate to WASM decoder if registered
+  if (bloscWasmDecompress) {
+    const input = new Uint8Array(compressed, 0, cbytes);
+    const output = bloscWasmDecompress(input);
+    if (output.byteLength !== nbytes) {
+      throw new Error(
+        `Blosc decompression size mismatch: expected ${nbytes}, got ${output.byteLength}`,
+      );
+    }
+    return new Float32Array(output.buffer, output.byteOffset, nbytes / 4);
   }
-  return new Float32Array(buf.buffer);
+
+  // No WASM decoder registered — fail with actionable message
+  const codecId = (header.getUint8(2) >> 5) & 0x07;
+  const codecNames: Record<number, string> = {
+    0: "blosclz", 1: "lz4", 2: "lz4hc", 4: "zlib", 5: "zstd",
+  };
+  throw new Error(
+    `No WASM Blosc decoder registered. Chunk uses ${codecNames[codecId] ?? `codec=${codecId}`}. ` +
+    `Call registerBloscDecoder() at Worker startup with a WASM blosc implementation ` +
+    `(e.g. numcodecs-wasm or blosc-wasm).`,
+  );
 }
 
 /**
@@ -341,14 +365,15 @@ async function fetchFromR2(
   env: Env,
   runId: string,
   param: string,
+  lat: number,
+  lon: number,
   chunkLat: number,
   chunkLon: number,
   localLat: number,
   localLon: number,
   ensemble: boolean,
-): Promise<Response> {
-  // Determine variable name (first data variable in the Zarr group)
-  // By convention we use the parameter name as the variable name.
+): Promise<Record<string, unknown>> {
+  // By convention the Zarr variable name matches the parameter name.
   const varName = param;
 
   const meta = await fetchZarrMeta(env, runId, param);
@@ -370,18 +395,15 @@ async function fetchFromR2(
     ensemble, nMembers,
   );
 
-  return new Response(
-    JSON.stringify({
-      lat: undefined,   // filled by caller
-      lon: undefined,
-      param,
-      run: runId,
-      unit: PARAM_UNITS[param] ?? "unknown",
-      ...(ensemble ? { members: nMembers } : {}),
-      values,
-    }),
-    { headers: { "Content-Type": "application/json" } },
-  );
+  return {
+    lat,
+    lon,
+    param,
+    run: runId,
+    unit: PARAM_UNITS[param] ?? "unknown",
+    ...(ensemble ? { members: nMembers } : {}),
+    values,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -432,15 +454,14 @@ export default {
       }
     }
 
-    // --- Cache lookup ---
+    // --- Cache lookup (keyed per pixel to avoid serving wrong data) ---
     const { chunkLat, chunkLon, localLat, localLon } = latLonToChunkIndex(lat, lon);
     const cacheKey = new Request(
-      `https://icon-cache/${runId}/${param}/${chunkLat}/${chunkLon}${ensemble ? "/ens" : ""}`,
+      `https://icon-cache/${runId}/${param}/${chunkLat}/${chunkLon}/${localLat}/${localLon}${ensemble ? "/ens" : ""}`,
     );
     const cache = caches.default;
     const cached = await cache.match(cacheKey);
     if (cached) {
-      // Re-extract single point from cached chunk response
       const body = await cached.json<Record<string, unknown>>();
       body.lat = lat;
       body.lon = lon;
@@ -454,10 +475,10 @@ export default {
     }
 
     // --- Fetch from R2 ---
-    let response: Response;
+    let body: Record<string, unknown>;
     try {
-      response = await fetchFromR2(
-        env, runId, param,
+      body = await fetchFromR2(
+        env, runId, param, lat, lon,
         chunkLat, chunkLon, localLat, localLon,
         ensemble,
       );
@@ -466,10 +487,6 @@ export default {
       return jsonError(500, `Failed to retrieve data: ${(err as Error).message}`);
     }
 
-    // Inject lat/lon into body
-    const body = await response.json<Record<string, unknown>>();
-    body.lat = lat;
-    body.lon = lon;
     const finalResponse = new Response(JSON.stringify(body), {
       headers: {
         "Content-Type": "application/json",
@@ -480,7 +497,7 @@ export default {
       },
     });
 
-    // Cache the chunk response for subsequent requests at nearby coordinates
+    // Cache the per-pixel response
     ctx.waitUntil(
       cache.put(
         cacheKey,
