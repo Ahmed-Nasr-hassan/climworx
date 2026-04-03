@@ -123,10 +123,14 @@ jobs:
           set -euo pipefail
           ASSETS="${GITHUB_WORKSPACE}/assets"
           mkdir -p "$ASSETS"
+          export CDO_DOWNLOAD_PATH=/tmp
           # Official ICON Global native grid (not ICON_*_EASY weights tarball)
           GRID_URL="https://opendata.dwd.de/weather/lib/cdo/icon_grid_0047_R19B07_L.nc.bz2"
           echo "::group::Download DWD icon_grid_0047_R19B07_L.nc.bz2"
           curl -fsSL -o /tmp/icon_grid.nc.bz2 "$GRID_URL"
+          BZ_BYTES=$(stat -c%s /tmp/icon_grid.nc.bz2)
+          BZ_MB=$(awk -v b="$BZ_BYTES" 'BEGIN {printf "%.2f", b/1024/1024}')
+          echo "icon_grid.nc.bz2: ${BZ_MB} MB (${BZ_BYTES} bytes)"
           bunzip2 -f /tmp/icon_grid.nc.bz2
           mv /tmp/icon_grid.nc "$ASSETS/icon_grid_R19B07_L.nc"
           echo "::endgroup::"
@@ -141,12 +145,10 @@ jobs:
             echo 'yinc      = -0.125'
           } > "$ASSETS/target_grid_world_0125.txt"
           echo "::group::cdo gendis (weights_distance.nc)"
-          cdo -O gendis,"$ASSETS/target_grid_world_0125.txt" \
-            "$ASSETS/icon_grid_R19B07_L.nc" "$ASSETS/weights_distance.nc"
+          cdo -O gendis,"$ASSETS/target_grid_world_0125.txt" -random,"$ASSETS/icon_grid_R19B07_L.nc" "$ASSETS/weights_distance.nc"
           echo "::endgroup::"
           echo "::group::cdo genycon (weights_conservative.nc)"
-          cdo -O genycon,"$ASSETS/target_grid_world_0125.txt" \
-            "$ASSETS/icon_grid_R19B07_L.nc" "$ASSETS/weights_conservative.nc"
+          cdo -O genycon,"$ASSETS/target_grid_world_0125.txt" -random,"$ASSETS/icon_grid_R19B07_L.nc" "$ASSETS/weights_conservative.nc"
           echo "::endgroup::"
           rm -f "$ASSETS/icon_grid_R19B07_L.nc"
           ls -la "$ASSETS"
