@@ -33,7 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -138,6 +138,54 @@ def with_retry(fn, *args, label: str = "", **kwargs):
                 label, attempt, MAX_RETRIES, exc, wait,
             )
             time.sleep(wait)
+
+
+# ---------------------------------------------------------------------------
+# Run availability check & fallback
+# ---------------------------------------------------------------------------
+
+MODEL_RUNS = ["00", "06", "12", "18"]
+
+
+def resolve_available_run(run_date: str, model_run: str, param: str, model: str) -> str:
+    """
+    Probe DWD for the requested run. If it 404s, fall back to earlier runs
+    (up to 4 steps back, crossing into the previous day if needed).
+    Returns the first available run_dt (YYYYMMDDHH).
+    """
+    # Build candidate runs: current, then progressively older
+    candidates: list[str] = []
+    dt = datetime.strptime(f"{run_date}{model_run}", "%Y%m%d%H")
+    for _ in range(len(MODEL_RUNS)):
+        candidates.append(dt.strftime("%Y%m%d%H"))
+        # Step back 6 hours
+        dt = dt - timedelta(hours=6)
+
+    for run_dt in candidates:
+        hh = run_dt[8:10]
+        fname_prefix = "icon_global" if model == "icon" else model.replace("-", "_")
+        url = (
+            f"{DWD_BASE}/{model}/grib/{hh}/{param}/"
+            f"{fname_prefix}_icosahedral_single-level"
+            f"_{run_dt}_000_{param.upper()}.grib2.bz2"
+        )
+        try:
+            resp = requests.head(url, timeout=15)
+            if resp.status_code == 200:
+                if run_dt != candidates[0]:
+                    log.warning(
+                        "Run %s not yet available on DWD, falling back to %s",
+                        candidates[0], run_dt,
+                    )
+                return run_dt
+            log.debug("Run %s not available (HTTP %d), trying older…", run_dt, resp.status_code)
+        except requests.RequestException as exc:
+            log.debug("Run %s probe failed (%s), trying older…", run_dt, exc)
+
+    raise RuntimeError(
+        f"No available run found on DWD for {param} "
+        f"(checked {candidates[0]} back to {candidates[-1]})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +665,12 @@ def main() -> None:
     # Phase 1 & 2: Download → Regrid → Stage  (skip if --validate-only)
     # ------------------------------------------------------------------
     if not args.validate_only:
+        # Probe DWD and fall back to an older run if the requested one isn't published yet
+        resolved_run_dt = resolve_available_run(run_date, args.model_run, param, model)
+        if resolved_run_dt != run_dt:
+            log.info("Resolved run_dt: %s → %s", run_dt, resolved_run_dt)
+            run_dt = resolved_run_dt
+
         try:
             t0 = time.monotonic()
             if ensemble:
