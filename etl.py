@@ -152,16 +152,19 @@ def build_urls(model: str, run_dt: str, param: str, step: int) -> list[str]:
     For ensemble (model='icon-eps'): ENSEMBLE_MEMBERS URLs.
     """
     hh = run_dt[8:10]  # "00", "06", "12", "18"
+    # DWD URL path uses "icon" or "icon-eps"
     base = f"{DWD_BASE}/{model}/grib/{hh}/{param}/"
+    # DWD filenames use "icon_global" / "icon-eps" prefix
+    fname_prefix = "icon_global" if model == "icon" else model.replace("-", "_")
     fname_template = (
-        f"{model.replace('-', '_')}_icosahedral_single-level"
+        f"{fname_prefix}_icosahedral_single-level"
         f"_{run_dt}_{step:03d}_{param.upper()}.grib2.bz2"
     )
     if model == "icon-eps":
         urls = []
         for member in range(1, ENSEMBLE_MEMBERS + 1):
             fname = (
-                f"{model.replace('-', '_')}_icosahedral_single-level"
+                f"{fname_prefix}_icosahedral_single-level"
                 f"_{run_dt}_{step:03d}_{member:03d}_{param.upper()}.grib2.bz2"
             )
             urls.append(base + fname)
