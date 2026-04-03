@@ -123,20 +123,14 @@ jobs:
           RUN_DATE: ${{ needs.resolve-run.outputs.run_date }}
         run: |
           set -euo pipefail
+
+          # Tell CDO where to cache the auto-downloaded native grids
+          export CDO_DOWNLOAD_PATH=/tmp/cdo_grids
+          mkdir -p "$CDO_DOWNLOAD_PATH"
+
           ASSETS="${GITHUB_WORKSPACE}/assets"
           mkdir -p "$ASSETS"
 
-          # 1. Download official ICON native grid
-          GRID_URL="https://opendata.dwd.de/weather/lib/cdo/icon_grid_0047_R19B07_L.nc.bz2"
-          echo "::group::Download native grid"
-          curl -fsSL -o /tmp/icon_grid.nc.bz2 "$GRID_URL"
-          bunzip2 -f /tmp/icon_grid.nc.bz2
-          mv /tmp/icon_grid.nc "$ASSETS/icon_grid_R19B07_L.nc"
-          echo "::endgroup::"
-
-          # 2. Download a small GRIB2 sample (t_2m step 0) as CDO data template.
-          # Path hour and filename run stamp must match (grib/HH/..._YYYYMMDDHH_000_...).
-          # Try workflow RUN_DATE first, then scan recent days × all cycles (yesterday alone often 404s).
           echo "::group::Download sample GRIB2 template"
           got=0
           if [ -n "${RUN_DATE:-}" ]; then
@@ -171,7 +165,7 @@ jobs:
           bunzip2 -f /tmp/sample.grib2.bz2
           echo "::endgroup::"
 
-          # 3. Write target regular grid definition
+          # Write target regular grid definition
           {
             echo 'gridtype  = lonlat'
             echo 'xsize     = 2879'
@@ -182,20 +176,16 @@ jobs:
             echo 'yinc      = -0.125'
           } > "$ASSETS/target_grid_world_0125.txt"
 
-          # 4. Generate weights by applying the native grid to the sample GRIB2 dataset
+          # Generate weights (CDO will auto-download the correct native grid based on the sample file)
           echo "::group::cdo gendis (weights_distance.nc)"
-          cdo -O gendis,"$ASSETS/target_grid_world_0125.txt" \
-            -setgrid,"$ASSETS/icon_grid_R19B07_L.nc" /tmp/sample.grib2 \
-            "$ASSETS/weights_distance.nc"
+          cdo -O gendis,"$ASSETS/target_grid_world_0125.txt" /tmp/sample.grib2 "$ASSETS/weights_distance.nc"
           echo "::endgroup::"
 
           echo "::group::cdo genycon (weights_conservative.nc)"
-          cdo -O genycon,"$ASSETS/target_grid_world_0125.txt" \
-            -setgrid,"$ASSETS/icon_grid_R19B07_L.nc" /tmp/sample.grib2 \
-            "$ASSETS/weights_conservative.nc"
+          cdo -O genycon,"$ASSETS/target_grid_world_0125.txt" /tmp/sample.grib2 "$ASSETS/weights_conservative.nc"
           echo "::endgroup::"
 
-          rm -f "$ASSETS/icon_grid_R19B07_L.nc" /tmp/sample.grib2
+          rm -f /tmp/sample.grib2
           ls -la "$ASSETS"
 
       - name: Run ETL (download → regrid → stage)

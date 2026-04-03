@@ -3,12 +3,14 @@
 Local smoke test: exercises the full ETL flow (download → decompress → regrid → Zarr)
 without pushing to R2. Tests 2 forecast steps to keep it fast.
 
-Remap weights are built the same way as GitHub Actions: native ICON grid + sample GRIB2
-from DWD, then cdo gendis / genycon with -setgrid (see .github/workflows/main.yml).
+Remap weights are built like GitHub Actions (gendis/genycon + sample GRIB2). If your local
+CDO cannot read ICON unstructured GRIB (common on macOS), the script falls back to DWD’s
+ICON_GLOBAL2WORLD_0125_EASY precomputed weights so the smoke test still runs.
 """
 import bz2
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +37,10 @@ TEST_STEPS = [0, 1]  # Only test first 2 steps for speed
 
 _REMAP_CACHE = Path(tempfile.gettempdir()) / "climworx_test_remap"
 _ICON_GRID_URL = "https://opendata.dwd.de/weather/lib/cdo/icon_grid_0047_R19B07_L.nc.bz2"
+_EASY_TARBALL_URL = (
+    "https://opendata.dwd.de/weather/lib/cdo/ICON_GLOBAL2WORLD_0125_EASY.tar.bz2"
+)
+_EASY_SUBDIR = "ICON_GLOBAL2WORLD_0125_EASY"
 
 # Must match etl.py GRID_NX / GRID_NY and CI workflow target_grid_world_0125.txt
 _TARGET_GRID_SPEC = """gridtype  = lonlat
@@ -105,6 +111,33 @@ def _run_cdo_shell(cmd: str) -> None:
         raise RuntimeError(f"CDO failed: {cmd}\n{r.stderr}")
 
 
+def _populate_cache_from_dwd_easy(
+    cache: Path,
+    target: Path,
+    w_dist: Path,
+    w_con: Path,
+) -> None:
+    """Precomputed EASY weights + target grid (single .nc copied to both weight names)."""
+    easy_root = cache / "easy_extract"
+    if easy_root.is_dir():
+        shutil.rmtree(easy_root, ignore_errors=True)
+    easy_root.mkdir(parents=True, exist_ok=True)
+    arc = easy_root / "easy.tar.bz2"
+    _stream_download(_EASY_TARBALL_URL, arc)
+    with tarfile.open(arc, "r:bz2") as tar:
+        tar.extractall(path=easy_root)
+    arc.unlink(missing_ok=True)
+    sub = easy_root / _EASY_SUBDIR
+    src_tg = sub / "target_grid_world_0125.txt"
+    src_w = sub / "weights_icogl2world_0125.nc"
+    if not src_tg.is_file() or not src_w.is_file():
+        raise RuntimeError(f"EASY tarball layout unexpected: {sub}")
+    shutil.copy2(src_tg, target)
+    shutil.copy2(src_w, w_dist)
+    shutil.copy2(src_w, w_con)
+    shutil.rmtree(easy_root, ignore_errors=True)
+
+
 def ensure_ci_style_remap_weights(param: str, run_dt: str) -> tuple[Path, Path]:
     """
     Build or reuse cached weights_distance.nc + weights_conservative.nc (same logic as CI).
@@ -146,19 +179,27 @@ def ensure_ci_style_remap_weights(param: str, run_dt: str) -> tuple[Path, Path]:
     target.write_text(_TARGET_GRID_SPEC)
 
     print("  [4/4] cdo gendis + genycon …")
-    # Same as .github/workflows/main.yml: pass raw GRIB2 (not cfgrib NetCDF — breaks gendis).
     tg, ic, sg, wd, wc = (str(p) for p in (target, icon_nc, sample_grib, w_dist, w_con))
     try:
-        _run_cdo_shell(f'cdo -O gendis,"{tg}" -setgrid,"{ic}" "{sg}" "{wd}"')
-        _run_cdo_shell(f'cdo -O genycon,"{tg}" -setgrid,"{ic}" "{sg}" "{wc}"')
-    except RuntimeError as exc:
-        print("  ! -setgrid + icon NC failed (grid cell mismatch?). Retrying with GRIB2 only.")
-        print(f"    ({exc})")
-        _run_cdo_shell(f'cdo -O gendis,"{tg}" "{sg}" "{wd}"')
-        _run_cdo_shell(f'cdo -O genycon,"{tg}" "{sg}" "{wc}"')
+        try:
+            _run_cdo_shell(f'cdo -O gendis,"{tg}" -setgrid,"{ic}" "{sg}" "{wd}"')
+            _run_cdo_shell(f'cdo -O genycon,"{tg}" -setgrid,"{ic}" "{sg}" "{wc}"')
+        except RuntimeError as exc:
+            print("  ! -setgrid + icon NC failed. Retrying with GRIB2 only.")
+            print(f"    ({exc})")
+            try:
+                _run_cdo_shell(f'cdo -O gendis,"{tg}" "{sg}" "{wd}"')
+                _run_cdo_shell(f'cdo -O genycon,"{tg}" "{sg}" "{wc}"')
+            except RuntimeError as exc2:
+                print("  ! Local CDO cannot build ICON weights; using DWD EASY tarball (~50 MB).")
+                print(f"    ({exc2})")
+                w_dist.unlink(missing_ok=True)
+                w_con.unlink(missing_ok=True)
+                _populate_cache_from_dwd_easy(cache, target, w_dist, w_con)
+    finally:
+        icon_nc.unlink(missing_ok=True)
+        sample_grib.unlink(missing_ok=True)
 
-    icon_nc.unlink(missing_ok=True)
-    sample_grib.unlink(missing_ok=True)
     print(f"  Done. Cache: {cache}\n")
 
     return target, weights_for_param
