@@ -14,6 +14,9 @@ __pycache__/
 *.pyc
 *.egg-info/
 
+# Local test artifacts (test_local.py)
+outputs/
+
 # Node
 node_modules/
 worker/dist/

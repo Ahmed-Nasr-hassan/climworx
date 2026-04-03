@@ -60,7 +60,7 @@ log = logging.getLogger("icon-etl")
 # ---------------------------------------------------------------------------
 
 DWD_BASE = "https://opendata.dwd.de/weather/nwp"
-GRID_NX = 2880   # 360 / 0.125
+GRID_NX = 2879   # DWD official: -180 to 179.75 at 0.125° (avoids wrap-around duplicate)
 GRID_NY = 1441   # 180 / 0.125 + 1  (includes both poles)
 LAT_MIN, LAT_MAX = -90.0, 90.0
 LON_MIN, LON_MAX = -180.0, 180.0
@@ -239,38 +239,82 @@ def stream_download(url: str) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def _write_target_grid(path: Path) -> None:
-    """Write a CDO target grid description for 0.125° global lat/lon."""
-    content = (
-        "gridtype  = lonlat\n"
-        f"xsize     = {GRID_NX}\n"
-        f"ysize     = {GRID_NY}\n"
-        "xfirst    = -180.0\n"
-        "xinc      = 0.125\n"
-        "yfirst    = -90.0\n"
-        "yinc      = 0.125\n"
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+# Production: parameter-specific CDO weights (conservative for flux/accum fields).
+WEIGHTS_MAP: dict[str, str] = {
+    "tot_prec": "weights_conservative.nc",
+    "aswdir_s": "weights_conservative.nc",
+    "clct": "weights_conservative.nc",
+    # t_2m, u_10m, v_10m, pmsl, relhum_2m → weights_bilinear.nc (default)
+}
+
+
+def _make_zeros_dataset(param: str) -> xr.Dataset:
+    """Return an all-zeros Dataset on the target 0.125° grid.
+
+    Used for step-0 of accumulated fields (e.g. tot_prec) where DWD publishes
+    a near-empty GRIB without grid metadata that CDO cannot regrid.
+    """
+    lats = np.linspace(90.0, -90.0, GRID_NY)     # north → south
+    lons = np.linspace(-180.0, 179.75, GRID_NX)   # west → east (2879 pts)
+    data = np.zeros((GRID_NY, GRID_NX), dtype=np.float32)
+    return xr.Dataset(
+        {param: (["latitude", "longitude"], data)},
+        coords={"latitude": lats, "longitude": lons},
     )
-    path.write_text(content)
 
 
-def regrid_grib_bytes(grib_bytes: bytes, param: str) -> xr.Dataset:
+def regrid_grib_bytes(
+    grib_bytes: bytes,
+    param: str,
+    *,
+    remap_target_grid: Path | None = None,
+    remap_weights: Path | None = None,
+) -> xr.Dataset:
     """
-    Write GRIB bytes to a temp file, regrid via CDO remapbil,
-    and return an xarray Dataset on the regular 0.125° grid.
+    Write GRIB bytes to a temp file, regrid via CDO remap, return xarray on 0.125° grid.
+
+    By default uses ``assets/`` (``target_grid_world_0125.txt`` + per-parameter weights).
+    For tests, pass ``remap_target_grid`` and ``remap_weights`` explicitly (e.g. DWD EASY
+    files downloaded outside this module).
+
+    Falls back to an all-zeros grid if the GRIB is too small to contain
+    grid metadata (e.g. step-0 of accumulated fields).
     """
+    # Step-0 of accumulated fields like tot_prec is a near-empty GRIB
+    # (~200 bytes) with no grid reference — return zeros instead.
+    if len(grib_bytes) < 10_000:
+        log.info("GRIB too small (%d bytes) — returning zeros grid for %s", len(grib_bytes), param)
+        return _make_zeros_dataset(param)
+
+    if remap_target_grid is not None or remap_weights is not None:
+        assert remap_target_grid is not None and remap_weights is not None, (
+            "remap_target_grid and remap_weights must be passed together"
+        )
+        target_grid, weights = remap_target_grid, remap_weights
+        assert target_grid.is_file(), f"Missing target grid file: {target_grid}"
+        assert weights.is_file(), f"Missing weights file: {weights}"
+    else:
+        assert ASSETS_DIR.is_dir(), (
+            f"Production regrid requires {ASSETS_DIR} with remap assets "
+            f"(target_grid_world_0125.txt, weights_bilinear.nc, weights_conservative.nc)"
+        )
+        target_grid = ASSETS_DIR / "target_grid_world_0125.txt"
+        weights = ASSETS_DIR / WEIGHTS_MAP.get(param, "weights_bilinear.nc")
+        assert target_grid.is_file(), f"Missing target grid file: {target_grid}"
+        assert weights.is_file(), f"Missing weights file for {param}: {weights}"
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         src = tmp / "input.grib2"
         dst = tmp / "regridded.nc"
-        grid_file = tmp / "target_grid.txt"
 
         src.write_bytes(grib_bytes)
-        _write_target_grid(grid_file)
 
         cmd = [
             "cdo",
             "-f", "nc4",
-            f"remapdis,{grid_file}",
+            f"remap,{target_grid},{weights}",
             str(src),
             str(dst),
         ]
@@ -282,6 +326,10 @@ def regrid_grib_bytes(grib_bytes: bytes, param: str) -> xr.Dataset:
 
         ds = xr.open_dataset(dst, engine="netcdf4").load()
 
+    # Drop time dim if CDO added one (single-step files get time=1)
+    if "time" in ds.dims and ds.sizes["time"] == 1:
+        ds = ds.squeeze("time", drop=True)
+
     # Normalize dimension names to match Zarr/Worker conventions
     rename_map: dict[str, str] = {}
     if "lat" in ds.dims and "latitude" not in ds.dims:
@@ -290,6 +338,11 @@ def regrid_grib_bytes(grib_bytes: bytes, param: str) -> xr.Dataset:
         rename_map["lon"] = "longitude"
     if rename_map:
         ds = ds.rename(rename_map)
+
+    # CDO uses GRIB short names (e.g. 'tp' for tot_prec) — rename to our param name
+    data_vars = list(ds.data_vars)
+    if len(data_vars) == 1 and data_vars[0] != param:
+        ds = ds.rename({data_vars[0]: param})
 
     # Ensure north-to-south latitude ordering (Worker expects index 0 = 90°N)
     if "latitude" in ds.coords and ds.latitude.values[0] < ds.latitude.values[-1]:
@@ -401,7 +454,7 @@ def upload_to_staging(
     store = s3fs.S3Map(root=staging_path, s3=fs, check=False)
 
     log.info("Uploading %s → s3://%s …", param, staging_path)
-    ds.to_zarr(store, mode="w", consolidated=True, encoding=encoding)
+    ds.to_zarr(store, mode="w", consolidated=True, encoding=encoding, zarr_format=2)
 
     # Write _SUCCESS marker for this parameter
     marker_key = f"{staging_path}/_SUCCESS"
