@@ -110,6 +110,7 @@ jobs:
           pip install --upgrade pip
           pip install \
             xarray \
+            dask \
             cfgrib \
             zarr \
             s3fs \
@@ -260,7 +261,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install xarray zarr s3fs numcodecs numpy requests netCDF4
+          pip install xarray dask zarr s3fs numcodecs numpy requests netCDF4
 
       - name: Validate + Promote + Janitor
         env:
