@@ -115,7 +115,7 @@ icon-global-databank/
 
 Request flow: rate limit check (100 req/min per IP via KV) → validate params → resolve run ID (KV cache, 5-min TTL) → convert lat/lon to chunk index via `latLonToChunkIndex()` → check Cloudflare Cache API (1h TTL, per-pixel cache key) → byte-range read from R2 → decompress Blosc chunk → extract time series → return JSON.
 
-**Blosc decompression:** The Worker requires a WASM Blosc decoder (e.g. `numcodecs-wasm` or `blosc-wasm`). Register it at startup via `registerBloscDecoder()` exported from `index.ts`. Blosc frame header parsing: nbytes at [4-7], cbytes at [12-15], codec ID at flags[2]>>5.
+**Chunk decompression:** The Worker uses the native `DecompressionStream("gzip")` API — no WASM or external dependencies needed. ETL compresses with `numcodecs.GZip(level=5)`.
 
 ### Data Constants
 
@@ -125,7 +125,7 @@ Request flow: rate limit check (100 req/min per IP via KV) → validate params �
 - **Forecast steps:** 97 total for 00Z/12Z (+0…+78h hourly, +81…+180h every 3h); 57 steps for 06Z/18Z (max +120h)
 - **Active parameters (CI):** `tot_prec`, `t_2m` (others: `u_10m`, `v_10m`, `pmsl`, `clct`, `relhum_2m`, `aswdir_s`)
 - **Chunk size:** 100×100 lat/lon pixels, full step dimension
-- **Compression:** Blosc + zstd + BITSHUFFLE, level 3 (`from numcodecs import Blosc`)
+- **Compression:** GZip level 5 (`from numcodecs import GZip`) — native `DecompressionStream` in Worker, no WASM needed
 
 ### Known Issues / Pending
 

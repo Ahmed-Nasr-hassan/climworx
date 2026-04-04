@@ -7,7 +7,7 @@
  *   1. Resolve run ID (KV cache of _LATEST_RUN, refreshed every 5 min)
  *   2. Compute Zarr chunk indices from lat/lon
  *   3. Byte-range read of the required chunk from R2
- *   4. Decompress Blosc/zstd chunk in-memory
+ *   4. Decompress GZip chunk in-memory
  *   5. Extract single grid-point time series
  *   6. Return JSON; cache response for 1 hour via Cache API
  */
@@ -23,7 +23,7 @@ export interface Env {
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const GRID_NX = 2880;      // 360 / 0.125
+const GRID_NX = 2879;      // DWD official: -180 to 179.875 at 0.125° (no wrap-around duplicate)
 const GRID_NY = 1441;      // 180 / 0.125 + 1
 const CHUNK_LAT = 100;
 const CHUNK_LON = 100;
@@ -59,18 +59,6 @@ let cachedLatestRun: { runId: string; fetchedAt: number } | null = null;
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-interface SpatialIndex {
-  run: string;
-  grid: {
-    lat_min: number; lat_max: number;
-    lon_min: number; lon_max: number;
-    nx: number; ny: number;
-    resolution: number;
-  };
-  chunks: { latitude: number; longitude: number };
-  params: string[];
-  steps: number[];
-}
 
 interface ZarrArrayMeta {
   chunks: number[];
@@ -196,13 +184,14 @@ async function fetchZarrMeta(
   runId: string,
   param: string,
 ): Promise<ZarrArrayMeta> {
-  const cacheKey = `${runId}/${param}/.zarray`;
+  // Variable array is nested: runs/{runId}/{param}/{param}/.zarray
+  const cacheKey = `${runId}/${param}/${param}/.zarray`;
 
   // Try KV metadata cache first
   const cached = await env.METADATA.get(cacheKey);
   if (cached) return JSON.parse(cached) as ZarrArrayMeta;
 
-  const obj = await env.DATABANK.get(`runs/${runId}/${param}/.zarray`);
+  const obj = await env.DATABANK.get(`runs/${runId}/${param}/${param}/.zarray`);
   if (!obj) throw new Error(`Zarr metadata not found for ${param} in run ${runId}`);
   const text = await obj.text();
   await env.METADATA.put(cacheKey, text, { expirationTtl: 3600 });
@@ -212,7 +201,8 @@ async function fetchZarrMeta(
 /**
  * Build the R2 key for a Zarr chunk.
  * Zarr v2 chunk key format: {c0}.{c1}.{c2}... (one index per dimension)
- * Dimensions order: [step, latitude, longitude]  (or [step, realization, lat, lon] for EPS)
+ * Leading dimensions (step, optional height/realization) always use chunk index 0.
+ * nDims is derived from the .zarray shape length.
  */
 function buildChunkKey(
   runId: string,
@@ -220,116 +210,89 @@ function buildChunkKey(
   varName: string,
   chunkLat: number,
   chunkLon: number,
-  ensemble: boolean,
+  nDims: number,
 ): string {
-  // step chunk = 0 (step is stored unchunked: chunk size = -1 = full dim)
-  if (ensemble) {
-    // dims: step, realization, latitude, longitude
-    return `runs/${runId}/${param}/${varName}/0.0.${chunkLat}.${chunkLon}`;
-  }
-  // dims: step, latitude, longitude
-  return `runs/${runId}/${param}/${varName}/0.${chunkLat}.${chunkLon}`;
+  // Leading dims (all before lat/lon) are always chunk 0
+  const leadingZeros = Array(nDims - 2).fill(0).join(".");
+  const prefix = leadingZeros ? `${leadingZeros}.` : "";
+  return `runs/${runId}/${param}/${varName}/${prefix}${chunkLat}.${chunkLon}`;
 }
 
 /**
- * Blosc frame header (16 bytes):
- *   [0]    version
- *   [1]    versionlz  — internal compressor version
- *   [2]    flags      — bits 5-7 encode the compressor id
- *   [3]    typesize   — element size used for shuffle
- *   [4-7]  nbytes     — uncompressed size  (LE uint32)
- *   [8-11] blocksize  — internal block size (LE uint32)
- *   [12-15] cbytes    — total compressed size incl. header (LE uint32)
- *
- * Compressor IDs (flags >> 5): 0=blosclz, 1=lz4, 2=lz4hc, 4=zlib, 5=zstd
- *
- * Production deployment requires a WASM Blosc decoder (e.g. numcodecs-wasm,
- * @aspect-build/aspect-blosc). The function below parses the header and
- * delegates to a WASM decoder. Install a suitable package and update the
- * import below:
- *
- *   import { bloscDecompress } from 'blosc-wasm';
+ * Decompress a GZip-compressed Zarr chunk using the native DecompressionStream API.
+ * ETL uses numcodecs.GZip(level=5); Workers support gzip natively — no WASM needed.
  */
-
-// Placeholder — replace with a real WASM Blosc decoder import.
-// e.g.: import { decompress as bloscDecompress } from 'blosc-wasm';
-let bloscWasmDecompress: ((buf: Uint8Array) => Uint8Array) | null = null;
-
-/**
- * Register an external WASM-based Blosc decompressor at Worker startup.
- * Call this once from a module-level init or from the fetch handler before
- * first use:
- *   import { decompress } from 'blosc-wasm';
- *   registerBloscDecoder(decompress);
- */
-export function registerBloscDecoder(fn: (buf: Uint8Array) => Uint8Array): void {
-  bloscWasmDecompress = fn;
-}
-
 async function decompressChunk(compressed: ArrayBuffer): Promise<Float32Array> {
-  const header = new DataView(compressed);
-  const nbytes = header.getUint32(4, true);   // uncompressed size in bytes
-  const cbytes = header.getUint32(12, true);   // compressed size incl. header
+  const stream = new DecompressionStream("gzip");
+  const writer = stream.writable.getWriter();
+  const reader = stream.readable.getReader();
 
-  if (compressed.byteLength < cbytes) {
-    throw new Error(
-      `Blosc frame truncated: expected ${cbytes} bytes, got ${compressed.byteLength}`,
-    );
+  writer.write(new Uint8Array(compressed));
+  writer.close();
+
+  const parts: Uint8Array[] = [];
+  let totalBytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    totalBytes += value.byteLength;
   }
 
-  // Delegate to WASM decoder if registered
-  if (bloscWasmDecompress) {
-    const input = new Uint8Array(compressed, 0, cbytes);
-    const output = bloscWasmDecompress(input);
-    if (output.byteLength !== nbytes) {
-      throw new Error(
-        `Blosc decompression size mismatch: expected ${nbytes}, got ${output.byteLength}`,
-      );
-    }
-    return new Float32Array(output.buffer, output.byteOffset, nbytes / 4);
-  }
+  const out = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const part of parts) { out.set(part, offset); offset += part.byteLength; }
 
-  // No WASM decoder registered — fail with actionable message
-  const codecId = (header.getUint8(2) >> 5) & 0x07;
-  const codecNames: Record<number, string> = {
-    0: "blosclz", 1: "lz4", 2: "lz4hc", 4: "zlib", 5: "zstd",
-  };
-  throw new Error(
-    `No WASM Blosc decoder registered. Chunk uses ${codecNames[codecId] ?? `codec=${codecId}`}. ` +
-    `Call registerBloscDecoder() at Worker startup with a WASM blosc implementation ` +
-    `(e.g. numcodecs-wasm or blosc-wasm).`,
-  );
+  return new Float32Array(out.buffer, out.byteOffset, totalBytes / 4);
 }
 
 /**
  * Extract a single lat/lon pixel's time series from a flat Float32Array.
- * Zarr stores data in C-order: [step, lat, lon] or [step, member, lat, lon].
+ * Zarr stores data in C-order. Strides are derived from the actual chunk shape
+ * so this works regardless of how many leading dimensions exist (e.g. [step, lat, lon]
+ * vs [step, height, lat, lon]).
+ *
+ * For ensemble data the second-to-last-minus-2 dimension is treated as the
+ * realization axis and each member value is returned per step.
  */
 function extractTimeSeries(
   data: Float32Array,
   localLat: number,
   localLon: number,
-  nSteps: number,
-  chunkLatSize: number,
-  chunkLonSize: number,
+  chunkShape: number[],
   ensemble: boolean,
-  nMembers = 40,
+  nMembers = 1,
 ): Record<number, number | number[]> {
+  const nDims = chunkShape.length;
+  const nSteps = chunkShape[0];
+  const chunkLatSize = chunkShape[nDims - 2];
+  const chunkLonSize = chunkShape[nDims - 1];
+
+  // Compute C-order strides from the chunk shape
+  const strides = new Array(nDims);
+  strides[nDims - 1] = 1;
+  for (let i = nDims - 2; i >= 0; i--) {
+    strides[i] = strides[i + 1] * chunkShape[i + 1];
+  }
+
+  // Base offset for the target pixel within the lat/lon plane
+  const pixelOffset = localLat * chunkLonSize + localLon;
+
   const result: Record<number, number | number[]> = {};
 
   for (let s = 0; s < nSteps; s++) {
+    const stepBase = s * strides[0];
+
     if (!ensemble) {
-      // Index in flat array: s * (chunkLatSize * chunkLonSize) + localLat * chunkLonSize + localLon
-      const idx = s * chunkLatSize * chunkLonSize + localLat * chunkLonSize + localLon;
-      result[s] = round4(data[idx]);
+      // Sum strides for all middle dims (e.g. height=0) — they're all index 0
+      // so they contribute 0 to the offset, leaving just stepBase + pixelOffset.
+      result[s] = round4(data[stepBase + pixelOffset]);
     } else {
       const memberValues: number[] = [];
+      // Realization is the second dimension for ensemble data
+      const memberStride = strides[1];
       for (let m = 0; m < nMembers; m++) {
-        const idx =
-          s * (nMembers * chunkLatSize * chunkLonSize) +
-          m * (chunkLatSize * chunkLonSize) +
-          localLat * chunkLonSize +
-          localLon;
+        const idx = stepBase + m * memberStride + pixelOffset;
         memberValues.push(round4(data[idx]));
       }
       result[s] = memberValues;
@@ -377,8 +340,7 @@ async function fetchFromR2(
   const varName = param;
 
   const meta = await fetchZarrMeta(env, runId, param);
-  const nSteps = meta.shape[0];
-  const chunkKey = buildChunkKey(runId, param, varName, chunkLat, chunkLon, ensemble);
+  const chunkKey = buildChunkKey(runId, param, varName, chunkLat, chunkLon, meta.shape.length);
 
   const obj = await env.DATABANK.get(chunkKey);
   if (!obj) {
@@ -391,8 +353,7 @@ async function fetchFromR2(
   const nMembers = ensemble ? (meta.shape[1] ?? 40) : 1;
   const values = extractTimeSeries(
     data, localLat, localLon,
-    nSteps, CHUNK_LAT, CHUNK_LON,
-    ensemble, nMembers,
+    meta.chunks, ensemble, nMembers,
   );
 
   return {
@@ -448,9 +409,9 @@ export default {
 
     // --- Validate run ID exists (only for explicit overrides) ---
     if (runOverride) {
-      const check = await env.DATABANK.head(`runs/${runId}/_SUCCESS`);
+      const check = await env.DATABANK.head(`runs/${runId}/${param}/_SUCCESS`);
       if (!check) {
-        return jsonError(404, `Run ${runId} not found or not yet promoted`);
+        return jsonError(404, `Run ${runId} not found or not yet promoted for ${param}`);
       }
     }
 

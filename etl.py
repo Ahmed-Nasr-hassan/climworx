@@ -42,7 +42,7 @@ import requests
 import s3fs
 import xarray as xr
 import zarr
-from numcodecs import Blosc
+from numcodecs import GZip
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -381,7 +381,7 @@ def regrid_grib_bytes(
 
 
 def make_encoding(ds: xr.Dataset) -> dict[str, Any]:
-    compressor = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
+    compressor = GZip(level=5)
     return {var: {"compressor": compressor} for var in ds.data_vars}
 
 
