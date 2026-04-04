@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ClimWorx — ICON Global Weather Dashboard</title>
+  <link rel="preconnect" href="https://basemaps.cartocdn.com" crossorigin />
+  <link rel="dns-prefetch" href="https://basemaps.cartocdn.com" />
 
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -570,6 +572,29 @@
     }
 
     let PATCHED_DARK_STYLE = null;
+    /** In-flight fetch+patch; reused so prefetch and switchBasemap share one request. */
+    let darkStyleLoadPromise = null;
+
+    /**
+     * Fetches and patches the Carto dark style once. Safe to call early (prefetch) or from switchBasemap.
+     */
+    function ensurePatchedDarkStyle() {
+      if (PATCHED_DARK_STYLE) return Promise.resolve(PATCHED_DARK_STYLE);
+      if (!darkStyleLoadPromise) {
+        darkStyleLoadPromise = fetch(BASEMAP_DARK_URL)
+          .then((resp) => resp.json())
+          .then((json) => {
+            PATCHED_DARK_STYLE = patchStyleJson(json);
+            return PATCHED_DARK_STYLE;
+          })
+          .catch((e) => {
+            console.error('Failed to load dark style', e);
+            darkStyleLoadPromise = null;
+            return null;
+          });
+      }
+      return darkStyleLoadPromise;
+    }
 
     /**
      * Modifies the raw style JSON in memory before MapLibre renders it.
@@ -670,17 +695,8 @@
       if (mode === 'imagery') {
         style = BASEMAP_IMAGERY_STYLE;
       } else {
-        if (!PATCHED_DARK_STYLE) {
-          try {
-            const resp = await fetch(BASEMAP_DARK_URL);
-            const json = await resp.json();
-            PATCHED_DARK_STYLE = patchStyleJson(json);
-          } catch (e) {
-            console.error('Failed to load dark style', e);
-            style = BASEMAP_DARK_URL; // fallback
-          }
-        }
-        style = PATCHED_DARK_STYLE || BASEMAP_DARK_URL;
+        const loaded = await ensurePatchedDarkStyle();
+        style = loaded || BASEMAP_DARK_URL;
       }
 
       if (seq !== basemapSwitchSeq) return;
@@ -1375,6 +1391,7 @@
     // =======================================================================
     async function init() {
       initMap();
+      void ensurePatchedDarkStyle();
 
       try {
         // Fetch run metadata
