@@ -78,8 +78,15 @@
   <!-- ====== Canvas overlay (synced to map) ====== -->
   <canvas id="data-canvas" class="absolute inset-0 z-10"></canvas>
 
+  <!-- ====== Mobile toggle button (top-left, visible only on small screens) ====== -->
+  <button id="btn-toggle-panel" onclick="togglePanel()"
+          class="glass sm:hidden absolute top-2 left-2 z-40 w-10 h-10 rounded-xl flex items-center justify-center shadow-xl text-white/70 hover:text-white transition-all">
+    <svg id="icon-panel-open" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+    <svg id="icon-panel-close" class="w-5 h-5 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+  </button>
+
   <!-- ====== Controls Panel (top-left) ====== -->
-  <div id="controls" class="glass absolute top-4 left-4 z-30 rounded-2xl p-4 w-72 space-y-3 shadow-2xl">
+  <div id="controls" class="glass absolute top-14 left-2 sm:top-4 sm:left-4 z-30 rounded-2xl p-3 sm:p-4 w-56 sm:w-72 space-y-2 sm:space-y-3 shadow-2xl max-h-[calc(100vh-5rem)] overflow-y-auto hidden sm:block">
     <!-- Run info -->
     <div id="run-badge" class="text-xs text-white/50 font-mono tracking-wide">Loading...</div>
 
@@ -87,16 +94,16 @@
     <div>
       <div class="text-[10px] uppercase tracking-wider text-white/40 mb-1.5">Basemap</div>
       <div class="flex rounded-xl overflow-hidden border border-white/10">
-        <button type="button" id="btn-basemap-dark" class="flex-1 py-2 text-sm font-medium transition-all bg-white/10 text-white border-r border-white/10"
-                onclick="switchBasemap('dark')">
-          Dark
-        </button>
-        <button type="button" id="btn-basemap-imagery" class="flex-1 py-2 text-sm font-medium transition-all text-white/40"
+        <button type="button" id="btn-basemap-imagery" class="flex-1 py-2 text-sm font-medium transition-all bg-emerald-500/25 text-emerald-200 border-r border-white/10"
                 onclick="switchBasemap('imagery')">
           Satellite
         </button>
+        <button type="button" id="btn-basemap-dark" class="flex-1 py-2 text-sm font-medium transition-all text-white/40"
+                onclick="switchBasemap('dark')">
+          Dark
+        </button>
       </div>
-      <p id="basemap-attrib" class="text-[10px] text-white/35 mt-1.5 leading-snug hidden">
+      <p id="basemap-attrib" class="text-[10px] text-white/35 mt-1.5 leading-snug">
         Imagery © Esri, Maxar, Earthstar Geographics
       </p>
     </div>
@@ -121,7 +128,7 @@
       <span id="btn-draw-label">Draw area</span>
     </button>
 
-    <!-- Layer appearance (after data loads; controls read safely if missing) -->
+    <!-- Layer appearance -->
     <div class="space-y-2 pt-2 border-t border-white/10">
       <div>
         <label class="flex items-center justify-between text-xs text-white/50">
@@ -131,6 +138,45 @@
         <input id="layer-opacity" type="range" min="0" max="100" value="85" step="1"
                class="w-full mt-1 cursor-pointer accent-indigo-400" />
       </div>
+
+      <!-- Color ramp -->
+      <div>
+        <label class="text-xs text-white/50 block mb-1">Color ramp</label>
+        <select id="color-ramp" onchange="changeColorRamp(this.value)"
+                class="w-full bg-white/10 border border-white/10 rounded-lg text-xs px-2 py-1.5 text-white/80 cursor-pointer">
+          <option value="auto" selected>Auto (per parameter)</option>
+          <option value="turbo">Turbo</option>
+          <option value="viridis">Viridis</option>
+          <option value="inferno">Inferno</option>
+          <option value="magma">Magma</option>
+          <option value="plasma">Plasma</option>
+          <option value="warm">Warm</option>
+          <option value="cool">Cool</option>
+          <option value="spectral">Spectral</option>
+          <option value="rdylbu">Red-Yellow-Blue</option>
+          <option value="ylgnbu">Yellow-Green-Blue</option>
+          <option value="blues">Blues</option>
+        </select>
+      </div>
+
+      <!-- Min / Max range -->
+      <div id="range-controls">
+        <label class="text-xs text-white/50 block mb-1">Value range</label>
+        <div class="flex items-center gap-1.5">
+          <input id="input-min" type="number" step="any"
+                 class="flex-1 bg-white/10 border border-white/10 rounded-lg text-xs px-2 py-1.5 text-white/80 font-mono w-0 min-w-0"
+                 placeholder="min" onchange="applyCustomRange()" />
+          <span class="text-white/30 text-xs">—</span>
+          <input id="input-max" type="number" step="any"
+                 class="flex-1 bg-white/10 border border-white/10 rounded-lg text-xs px-2 py-1.5 text-white/80 font-mono w-0 min-w-0"
+                 placeholder="max" onchange="applyCustomRange()" />
+          <button onclick="resetRange()" title="Reset to auto"
+                  class="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white/50 hover:text-white/80 text-xs transition-all">
+            ↺
+          </button>
+        </div>
+      </div>
+
       <label class="flex items-center gap-2 text-xs text-white/70 cursor-pointer select-none">
         <input id="chk-smooth" type="checkbox" checked class="rounded border-white/20 bg-white/5" />
         <span>Smooth grid <span class="text-white/40">(bilinear)</span></span>
@@ -146,43 +192,45 @@
   </div>
 
   <!-- ====== Clock / Timestamp (top-right) ====== -->
-  <div id="clock" class="glass absolute top-4 right-4 z-30 rounded-2xl px-5 py-3 text-right shadow-2xl hidden">
-    <div id="clock-time" class="text-lg font-semibold tracking-tight"></div>
+  <div id="clock" class="glass absolute top-2 right-2 sm:top-4 sm:right-4 z-30 rounded-2xl px-3 py-2 sm:px-5 sm:py-3 text-right shadow-2xl hidden max-w-[45vw]">
+    <div id="clock-time" class="text-sm sm:text-lg font-semibold tracking-tight truncate"></div>
     <div id="clock-meta" class="text-xs text-white/50 font-mono mt-0.5"></div>
   </div>
 
   <!-- ====== Color Legend (right side) ====== -->
-  <div id="legend" class="glass absolute top-24 right-4 z-30 rounded-2xl p-3 w-16 hidden shadow-2xl">
+  <div id="legend" class="glass absolute top-20 sm:top-24 right-2 sm:right-4 z-30 rounded-2xl p-2 sm:p-3 w-12 sm:w-16 hidden shadow-2xl">
     <canvas id="legend-canvas" width="24" height="200" class="mx-auto rounded"></canvas>
     <div id="legend-max" class="text-[10px] text-white/60 text-center mt-1 font-mono"></div>
     <div id="legend-min" class="text-[10px] text-white/60 text-center mt-auto font-mono"></div>
   </div>
 
   <!-- ====== Playback Bar (bottom) ====== -->
-  <div id="playback" class="glass absolute bottom-0 left-0 right-0 z-30 px-6 py-3 hidden"
+  <div id="playback" class="glass absolute bottom-0 left-0 right-0 z-30 px-3 py-2 sm:px-6 sm:py-3 hidden"
        style="border-radius: 1rem 1rem 0 0;">
-    <div class="flex items-center gap-3 sm:gap-4 w-full min-w-0">
-      <!-- Play/Pause -->
-      <button type="button" id="btn-play" onclick="togglePlay()" class="shrink-0 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-all">
-        <svg id="icon-play" class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-        <svg id="icon-pause" class="w-5 h-5 hidden" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-      </button>
-      <!-- Timeline + step caption (own column so long text never fights speed control) -->
-      <div class="flex-1 min-w-0 flex flex-col gap-1">
-        <input id="timeline" type="range" min="0" max="92" value="0" step="1" class="w-full cursor-pointer" oninput="seekTo(this.value)" />
-        <div id="step-label" class="text-[11px] sm:text-xs text-white/60 font-mono leading-snug text-center sm:text-left break-words hyphens-none"></div>
-      </div>
-      <!-- Speed (fixed column — never overlaps step/time line) -->
-      <div class="shrink-0 flex flex-col items-stretch gap-0.5 w-[4.5rem] sm:w-20">
-        <label for="speed-select" class="text-[10px] uppercase tracking-wide text-white/40 text-center">Speed</label>
+    <!-- Mobile: stack vertically; Desktop: single row -->
+    <div class="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 w-full min-w-0">
+      <!-- Top row on mobile: play + slider + speed -->
+      <div class="flex items-center gap-2 sm:gap-3 w-full min-w-0">
+        <!-- Play/Pause -->
+        <button type="button" id="btn-play" onclick="togglePlay()" class="shrink-0 w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-all">
+          <svg id="icon-play" class="w-4 h-4 sm:w-5 sm:h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          <svg id="icon-pause" class="w-4 h-4 sm:w-5 sm:h-5 hidden" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+        </button>
+        <!-- Timeline -->
+        <div class="flex-1 min-w-0">
+          <input id="timeline" type="range" min="0" max="92" value="0" step="1" class="w-full cursor-pointer" oninput="seekTo(this.value)" />
+        </div>
+        <!-- Speed -->
         <select id="speed-select" onchange="setSpeed(this.value)"
-                class="bg-white/10 border border-white/10 rounded-lg text-xs px-1.5 py-1.5 text-white/80 cursor-pointer w-full text-center">
+                class="shrink-0 bg-white/10 border border-white/10 rounded-lg text-[11px] sm:text-xs px-1.5 py-1.5 text-white/80 cursor-pointer w-14 sm:w-16 text-center">
           <option value="0.5">0.5×</option>
           <option value="1" selected>1×</option>
           <option value="2">2×</option>
           <option value="4">4×</option>
         </select>
       </div>
+      <!-- Step label (below on mobile, inline on desktop) -->
+      <div id="step-label" class="text-[10px] sm:text-xs text-white/60 font-mono leading-snug text-center sm:text-right sm:whitespace-nowrap sm:w-56 sm:shrink-0 truncate"></div>
     </div>
   </div>
 
@@ -253,7 +301,7 @@
     };
 
     // State
-    let currentBasemap = 'dark';
+    let currentBasemap = 'imagery';
     let basemapSwitchSeq = 0;
     /** True after first style `load`; prevents basemap switch racing initial load / double Draw. */
     let mapInitialLoadDone = false;
@@ -269,7 +317,10 @@
     let lastFrameTime = 0;
     let colorScale = null;
     let dataMin = 0, dataMax = 1;
+    let autoDataMin = 0, autoDataMax = 1; // auto-computed from data
+    let currentRamp = 'auto';             // 'auto' picks per-param default
     let map, draw, canvas, ctx;
+    let panelVisible = false; // mobile panel state (desktop always visible via sm:block)
 
     // =======================================================================
     // Lat/Lon ↔ Array Index Math
@@ -295,6 +346,20 @@
     function indexToLon(j) { return LON_MIN + j * RESOLUTION; }
 
     // =======================================================================
+    // Mobile Panel Toggle
+    // =======================================================================
+    window.togglePanel = function() {
+      const panel = document.getElementById('controls');
+      const iconOpen = document.getElementById('icon-panel-open');
+      const iconClose = document.getElementById('icon-panel-close');
+      panelVisible = !panelVisible;
+      panel.classList.toggle('hidden', !panelVisible);
+      panel.classList.toggle('sm:block', !panelVisible); // keep desktop always visible
+      iconOpen.classList.toggle('hidden', panelVisible);
+      iconClose.classList.toggle('hidden', !panelVisible);
+    };
+
+    // =======================================================================
     // Toast Notifications
     // =======================================================================
     function showToast(msg, type = 'error') {
@@ -302,7 +367,15 @@
       const colors = { error: 'bg-red-500/80', info: 'bg-blue-500/80', success: 'bg-emerald-500/80' };
       const el = document.createElement('div');
       el.className = `glass toast-animate ${colors[type] || colors.info} text-white text-sm px-4 py-2.5 rounded-xl flex items-center gap-2 shadow-xl max-w-md`;
-      el.innerHTML = `<span class="flex-1">${msg}</span><button onclick="this.parentElement.remove()" class="text-white/60 hover:text-white ml-2">&times;</button>`;
+      const span = document.createElement('span');
+      span.className = 'flex-1';
+      span.textContent = msg;
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'text-white/60 hover:text-white ml-2';
+      closeBtn.textContent = '\u00d7';
+      closeBtn.onclick = () => el.remove();
+      el.appendChild(span);
+      el.appendChild(closeBtn);
       container.appendChild(el);
       setTimeout(() => el.remove(), 6000);
     }
@@ -402,7 +475,6 @@
             // Stride within this chunk's flat array (C-order)
             // For 4D [step, height=1, lat, lon]: stride_step = 1*lat*lon
             // For 3D [step, lat, lon]: stride_step = lat*lon
-            const chunkPlaneSize = actualChunkLat * actualChunkLon;
             // For 4D, height dim contributes: stride = height * lat * lon
             const chunkStepStride = nDims === 4
               ? chunks[1] * actualChunkLat * actualChunkLon
@@ -483,13 +555,13 @@
       const btnDark = document.getElementById('btn-basemap-dark');
       const btnImg = document.getElementById('btn-basemap-imagery');
       const attrib = document.getElementById('basemap-attrib');
-      if (btnDark) {
-        btnDark.className = `flex-1 py-2 text-sm font-medium transition-all border-r border-white/10 ${
-          isDark ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/60'}`;
-      }
       if (btnImg) {
-        btnImg.className = `flex-1 py-2 text-sm font-medium transition-all ${
+        btnImg.className = `flex-1 py-2 text-sm font-medium transition-all border-r border-white/10 ${
           !isDark ? 'bg-emerald-500/25 text-emerald-200' : 'text-white/40 hover:text-white/60'}`;
+      }
+      if (btnDark) {
+        btnDark.className = `flex-1 py-2 text-sm font-medium transition-all ${
+          isDark ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/60'}`;
       }
       if (attrib) attrib.classList.toggle('hidden', isDark);
     }
@@ -578,7 +650,7 @@
     function initMap() {
       map = new maplibregl.Map({
         container: 'map',
-        style: BASEMAP_DARK_URL,
+        style: BASEMAP_IMAGERY_STYLE,
         center: [13.4, 52.5],  // Berlin
         zoom: 5,
         attributionControl: false,
@@ -609,9 +681,18 @@
       document.getElementById('chk-smooth')?.addEventListener('change', () => renderFrame());
       document.getElementById('chk-contours')?.addEventListener('change', () => renderFrame());
 
-      // Tooltip hover
+      // Tooltip hover (mouse + touch)
       canvas.addEventListener('mousemove', onCanvasHover);
       canvas.addEventListener('mouseleave', () => {
+        document.getElementById('tooltip').classList.add('hidden');
+      });
+      canvas.addEventListener('touchmove', (e) => {
+        if (e.touches.length === 1) {
+          const t = e.touches[0];
+          onCanvasHover({ clientX: t.clientX, clientY: t.clientY });
+        }
+      }, { passive: true });
+      canvas.addEventListener('touchend', () => {
         document.getElementById('tooltip').classList.add('hidden');
       });
 
@@ -718,6 +799,9 @@
         updateTimeline();
         renderLegend();
         renderFrame();
+
+        // Auto-play animation
+        if (!playing) togglePlay();
       } catch (err) {
         showToast(`Failed to fetch data: ${err.message}`, 'error');
         console.error(err);
@@ -729,6 +813,25 @@
     // =======================================================================
     // Color Scales
     // =======================================================================
+    const RAMP_MAP = {
+      turbo:    d3.interpolateTurbo,
+      viridis:  d3.interpolateViridis,
+      inferno:  d3.interpolateInferno,
+      magma:    d3.interpolateMagma,
+      plasma:   d3.interpolatePlasma,
+      warm:     d3.interpolateWarm,
+      cool:     d3.interpolateCool,
+      spectral: d3.interpolateSpectral,
+      rdylbu:   d3.interpolateRdYlBu,
+      ylgnbu:   d3.interpolateYlGnBu,
+      blues:    d3.interpolateBlues,
+    };
+
+    function getInterpolator() {
+      if (currentRamp !== 'auto' && RAMP_MAP[currentRamp]) return RAMP_MAP[currentRamp];
+      return currentParam === 't_2m' ? d3.interpolateTurbo : d3.interpolateYlGnBu;
+    }
+
     function computeColorScale() {
       if (!sliceData) return;
 
@@ -736,24 +839,67 @@
       for (let i = 0; i < sliceData.length; i++) {
         const v = sliceData[i];
         if (!isNaN(v) && isFinite(v)) {
-          // For temperature, convert K→°C for scale computation
           const mapped = currentParam === 't_2m' ? v - 273.15 : v;
           if (mapped < min) min = mapped;
           if (mapped > max) max = mapped;
         }
       }
 
+      autoDataMin = min;
+      autoDataMax = max;
       dataMin = min;
       dataMax = max;
 
-      if (currentParam === 't_2m') {
-        // Diverging scale using Turbo
-        colorScale = d3.scaleSequential(d3.interpolateTurbo).domain([dataMin, dataMax]);
-      } else {
-        // Sequential scale for precipitation; 0 = transparent
-        colorScale = d3.scaleSequential(d3.interpolateYlGnBu).domain([0, dataMax]);
-      }
+      // Sync UI inputs with auto values
+      const inputMin = document.getElementById('input-min');
+      const inputMax = document.getElementById('input-max');
+      if (inputMin) inputMin.value = dataMin.toFixed(1);
+      if (inputMax) inputMax.value = dataMax.toFixed(1);
+
+      rebuildColorScale();
     }
+
+    function rebuildColorScale() {
+      const interp = getInterpolator();
+      const domainMin = currentParam === 'tot_prec' ? Math.max(0, dataMin) : dataMin;
+      colorScale = d3.scaleSequential(interp).domain([domainMin, dataMax]);
+    }
+
+    window.changeColorRamp = function(ramp) {
+      currentRamp = ramp;
+      if (!sliceData) return;
+      rebuildColorScale();
+      renderLegend();
+      renderFrame();
+    };
+
+    window.applyCustomRange = function() {
+      const inputMin = document.getElementById('input-min');
+      const inputMax = document.getElementById('input-max');
+      const newMin = parseFloat(inputMin.value);
+      const newMax = parseFloat(inputMax.value);
+      if (isNaN(newMin) || isNaN(newMax) || newMin >= newMax) {
+        showToast('Invalid range — min must be less than max.', 'error');
+        return;
+      }
+      dataMin = newMin;
+      dataMax = newMax;
+      rebuildColorScale();
+      renderLegend();
+      renderFrame();
+    };
+
+    window.resetRange = function() {
+      dataMin = autoDataMin;
+      dataMax = autoDataMax;
+      const inputMin = document.getElementById('input-min');
+      const inputMax = document.getElementById('input-max');
+      if (inputMin) inputMin.value = dataMin.toFixed(1);
+      if (inputMax) inputMax.value = dataMax.toFixed(1);
+      rebuildColorScale();
+      renderLegend();
+      renderFrame();
+    };
 
     function valueToColor(rawValue) {
       if (isNaN(rawValue)) return [0, 0, 0, 0];
@@ -1098,7 +1244,9 @@
       const displayVal = currentParam === 't_2m' ? (val - 273.15).toFixed(1) + ' °C' : val.toFixed(2) + ' mm';
       const unit = currentParam === 't_2m' ? '°C' : 'mm';
 
-      document.getElementById('tooltip-coords').textContent = `${lat.toFixed(3)}°N, ${lon.toFixed(3)}°E`;
+      const latLabel = lat >= 0 ? `${lat.toFixed(3)}°N` : `${(-lat).toFixed(3)}°S`;
+      const lonLabel = lon >= 0 ? `${lon.toFixed(3)}°E` : `${(-lon).toFixed(3)}°W`;
+      document.getElementById('tooltip-coords').textContent = `${latLabel}, ${lonLabel}`;
       document.getElementById('tooltip-value').textContent = isNaN(val) ? 'No data' : displayVal;
 
       // Sparkline: time series for this pixel
