@@ -88,6 +88,7 @@ jobs:
       matrix:
         parameter:
           - tot_prec
+          - t_2m
       fail-fast: false   # Continue other parameters if one fails
 
     steps:
@@ -281,7 +282,7 @@ jobs:
             --run-date  "$RUN_DATE"  \
             --keep-runs "$KEEP_RUNS" \
             --validate-only \
-            --params tot_prec \
+            --params tot_prec t_2m \
             $ENSEMBLE_FLAG
 
           END=$(date -u +%s)

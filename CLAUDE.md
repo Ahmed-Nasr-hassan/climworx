@@ -123,7 +123,7 @@ Request flow: rate limit check (100 req/min per IP via KV) → validate params �
   - Note: `worker/index.ts` currently has `GRID_NX = 2880` — **pending fix** to match `etl.py`
 - **CDO target grid:** xfirst=-180.0, xinc=0.125, xsize=2879; yfirst=90.0, yinc=-0.125, ysize=1441 (N→S)
 - **Forecast steps:** 97 total for 00Z/12Z (+0…+78h hourly, +81…+180h every 3h); 57 steps for 06Z/18Z (max +120h)
-- **Active parameters (CI):** `tot_prec` (others: `t_2m`, `u_10m`, `v_10m`, `pmsl`, `clct`, `relhum_2m`, `aswdir_s`)
+- **Active parameters (CI):** `tot_prec`, `t_2m` (others: `u_10m`, `v_10m`, `pmsl`, `clct`, `relhum_2m`, `aswdir_s`)
 - **Chunk size:** 100×100 lat/lon pixels, full step dimension
 - **Compression:** Blosc + zstd + BITSHUFFLE, level 3 (`from numcodecs import Blosc`)
 
