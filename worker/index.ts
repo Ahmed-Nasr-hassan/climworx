@@ -368,14 +368,87 @@ async function fetchFromR2(
 }
 
 // ---------------------------------------------------------------------------
+// CORS helpers
+// ---------------------------------------------------------------------------
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Range",
+  "Access-Control-Expose-Headers": "Content-Length, Content-Range",
+};
+
+function withCors(response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const [k, v] of Object.entries(CORS_HEADERS)) headers.set(k, v);
+  return new Response(response.body, { status: response.status, headers });
+}
+
+// ---------------------------------------------------------------------------
+// Zarr proxy: GET /zarr/{param}/{...path} → R2 runs/{latestRun}/{param}/{path}
+// ---------------------------------------------------------------------------
+async function handleZarrProxy(
+  env: Env,
+  pathname: string,
+): Promise<Response> {
+  // /zarr/spatial_index.json — special case, lives at bucket root
+  if (pathname === "/zarr/spatial_index.json") {
+    const obj = await env.DATABANK.get("spatial_index.json");
+    if (!obj) return jsonError(404, "spatial_index.json not found");
+    return new Response(obj.body, {
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+    });
+  }
+
+  // /zarr/{param}/{...path}
+  const match = pathname.match(/^\/zarr\/([^/]+)\/(.+)$/);
+  if (!match) return jsonError(400, "Invalid zarr path. Use /zarr/{param}/{path}");
+
+  const [, param, objPath] = match;
+
+  let runId: string;
+  try {
+    runId = await resolveRunId(env, null);
+  } catch {
+    return jsonError(503, "No latest run available");
+  }
+
+  const r2Key = `runs/${runId}/${param}/${objPath}`;
+  const obj = await env.DATABANK.get(r2Key);
+  if (!obj) return jsonError(404, `Not found: ${r2Key}`);
+
+  const isMetadata = /\.(zarray|zattrs|zmetadata|zgroup)$/.test(objPath);
+  const contentType = isMetadata ? "application/json" : "application/octet-stream";
+
+  return new Response(obj.body, {
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": "public, max-age=3600",
+      ...CORS_HEADERS,
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main Worker handler
 // ---------------------------------------------------------------------------
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    // CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
+    // Zarr proxy route
+    if (url.pathname.startsWith("/zarr/")) {
+      if (request.method !== "GET") return withCors(jsonError(405, "Method not allowed"));
+      return handleZarrProxy(env, url.pathname);
+    }
+
+    // Existing per-pixel API (GET /)
     if (url.pathname !== "/") {
-      return jsonError(404, "Not found. Use GET /?lat=&lon=&param=");
+      return jsonError(404, "Not found. Use GET /?lat=&lon=&param= or GET /zarr/{param}/{path}");
     }
     if (request.method !== "GET") {
       return jsonError(405, "Method not allowed");
