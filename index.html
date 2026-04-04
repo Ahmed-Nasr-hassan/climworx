@@ -5,7 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ClimWorx — ICON Global Weather Dashboard</title>
   <link rel="preconnect" href="https://basemaps.cartocdn.com" crossorigin />
+  <link rel="preconnect" href="https://tiles.basemaps.cartocdn.com" crossorigin />
   <link rel="dns-prefetch" href="https://basemaps.cartocdn.com" />
+  <link rel="dns-prefetch" href="https://tiles.basemaps.cartocdn.com" />
+  <!-- Warm HTTP cache + start JSON download before the deferred module runs -->
+  <link rel="preload" as="fetch" href="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json" crossorigin />
+  <script>
+    (function () {
+      var u = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+      window.__CARTO_DARK_STYLE_JSON_PROMISE = fetch(u).then(function (r) {
+        return r.json();
+      });
+    })();
+  </script>
 
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -581,10 +593,19 @@
     function ensurePatchedDarkStyle() {
       if (PATCHED_DARK_STYLE) return Promise.resolve(PATCHED_DARK_STYLE);
       if (!darkStyleLoadPromise) {
-        darkStyleLoadPromise = fetch(BASEMAP_DARK_URL)
-          .then((resp) => resp.json())
+        const jsonPromise =
+          window.__CARTO_DARK_STYLE_JSON_PROMISE != null
+            ? window.__CARTO_DARK_STYLE_JSON_PROMISE.catch(() =>
+                fetch(BASEMAP_DARK_URL).then((r) => r.json()),
+              )
+            : fetch(BASEMAP_DARK_URL).then((r) => r.json());
+        darkStyleLoadPromise = jsonPromise
           .then((json) => {
-            PATCHED_DARK_STYLE = patchStyleJson(json);
+            const copy =
+              typeof structuredClone === 'function'
+                ? structuredClone(json)
+                : JSON.parse(JSON.stringify(json));
+            PATCHED_DARK_STYLE = patchStyleJson(copy);
             return PATCHED_DARK_STYLE;
           })
           .catch((e) => {
@@ -623,16 +644,20 @@
       }
 
       /**
-       * Legacy zoom { stops: [[z, "{name_en}"], ...] } → top-level step; each output is wrapIsrael(leaf).
-       * MapLibre forbids ['zoom'] except as input to a top-level step/interpolate, so case(...) must not wrap step(zoom,...).
+       * Legacy zoom { stops: [[z, "{name_en}"], ...] } → one flat ["step", ["zoom"], default, z1, out1, z2, out2, ...].
+       * Nested step(step(...)) trees are valid but extremely slow to compile; a single step keeps MapLibre responsive.
        */
       function patchedTextFieldFromStops(stopsRaw) {
         const stops = [...stopsRaw].sort((a, b) => a[0] - b[0]);
         if (stops.length === 0) return null;
-        let expr = wrapIsrael(leafFromToken(stops[0][1]));
+
+        const expr = ['step', ['zoom'], wrapIsrael(leafFromToken(stops[0][1]))];
+
         for (let i = 1; i < stops.length; i++) {
-          expr = ['step', ['zoom'], expr, stops[i][0], wrapIsrael(leafFromToken(stops[i][1]))];
+          expr.push(stops[i][0]);
+          expr.push(wrapIsrael(leafFromToken(stops[i][1])));
         }
+
         return expr;
       }
 
