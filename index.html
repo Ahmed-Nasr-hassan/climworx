@@ -57,6 +57,11 @@
       100% { box-shadow: 0 0 0 0 rgba(99,102,241,0); }
     }
     .pulse-active { animation: pulse-ring 1.5s infinite; }
+    /* Crosshair while drawing a region (MapLibre nests canvases) */
+    .draw-area-active .maplibregl-canvas-container canvas,
+    .draw-area-active .maplibregl-canvas {
+      cursor: crosshair !important;
+    }
     /* Spinner */
     @keyframes spin { to { transform: rotate(360deg); } }
     .spinner { animation: spin 0.8s linear infinite; }
@@ -78,6 +83,24 @@
     <!-- Run info -->
     <div id="run-badge" class="text-xs text-white/50 font-mono tracking-wide">Loading...</div>
 
+    <!-- Basemap -->
+    <div>
+      <div class="text-[10px] uppercase tracking-wider text-white/40 mb-1.5">Basemap</div>
+      <div class="flex rounded-xl overflow-hidden border border-white/10">
+        <button type="button" id="btn-basemap-dark" class="flex-1 py-2 text-sm font-medium transition-all bg-white/10 text-white border-r border-white/10"
+                onclick="switchBasemap('dark')">
+          Dark
+        </button>
+        <button type="button" id="btn-basemap-imagery" class="flex-1 py-2 text-sm font-medium transition-all text-white/40"
+                onclick="switchBasemap('imagery')">
+          Satellite
+        </button>
+      </div>
+      <p id="basemap-attrib" class="text-[10px] text-white/35 mt-1.5 leading-snug hidden">
+        Imagery © Esri, Maxar, Earthstar Geographics
+      </p>
+    </div>
+
     <!-- Parameter toggle -->
     <div class="flex rounded-xl overflow-hidden border border-white/10">
       <button id="btn-t2m" class="flex-1 py-2 text-sm font-medium transition-all bg-orange-500/20 text-orange-300 border-r border-white/10"
@@ -90,12 +113,33 @@
       </button>
     </div>
 
-    <!-- Draw button -->
-    <button id="btn-draw" class="w-full py-2.5 rounded-xl text-sm font-medium bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/30 transition-all"
-            onclick="activateDraw()">
+    <!-- Draw area (toggle: click again to cancel) -->
+    <button type="button" id="btn-draw" aria-pressed="false"
+            class="w-full py-2.5 rounded-xl text-sm font-medium bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/30 transition-all"
+            onclick="toggleDrawArea()">
       <svg class="inline w-4 h-4 mr-1 -mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg>
-      Draw Area
+      <span id="btn-draw-label">Draw area</span>
     </button>
+
+    <!-- Layer appearance (after data loads; controls read safely if missing) -->
+    <div class="space-y-2 pt-2 border-t border-white/10">
+      <div>
+        <label class="flex items-center justify-between text-xs text-white/50">
+          <span>Layer opacity</span>
+          <span id="opacity-label" class="font-mono text-white/70">85%</span>
+        </label>
+        <input id="layer-opacity" type="range" min="0" max="100" value="85" step="1"
+               class="w-full mt-1 cursor-pointer accent-indigo-400" />
+      </div>
+      <label class="flex items-center gap-2 text-xs text-white/70 cursor-pointer select-none">
+        <input id="chk-smooth" type="checkbox" checked class="rounded border-white/20 bg-white/5" />
+        <span>Smooth grid <span class="text-white/40">(bilinear)</span></span>
+      </label>
+      <label class="flex items-center gap-2 text-xs text-white/70 cursor-pointer select-none">
+        <input id="chk-contours" type="checkbox" class="rounded border-white/20 bg-white/5" />
+        <span>Contours</span>
+      </label>
+    </div>
 
     <!-- Area info (shown when data loaded) -->
     <div id="area-info" class="text-xs text-white/40 hidden"></div>
@@ -117,26 +161,28 @@
   <!-- ====== Playback Bar (bottom) ====== -->
   <div id="playback" class="glass absolute bottom-0 left-0 right-0 z-30 px-6 py-3 hidden"
        style="border-radius: 1rem 1rem 0 0;">
-    <div class="flex items-center gap-4">
+    <div class="flex items-center gap-3 sm:gap-4 w-full min-w-0">
       <!-- Play/Pause -->
-      <button id="btn-play" onclick="togglePlay()" class="w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-all">
+      <button type="button" id="btn-play" onclick="togglePlay()" class="shrink-0 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-all">
         <svg id="icon-play" class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
         <svg id="icon-pause" class="w-5 h-5 hidden" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
       </button>
-      <!-- Timeline -->
-      <div class="flex-1">
+      <!-- Timeline + step caption (own column so long text never fights speed control) -->
+      <div class="flex-1 min-w-0 flex flex-col gap-1">
         <input id="timeline" type="range" min="0" max="92" value="0" step="1" class="w-full cursor-pointer" oninput="seekTo(this.value)" />
+        <div id="step-label" class="text-[11px] sm:text-xs text-white/60 font-mono leading-snug text-center sm:text-left break-words hyphens-none"></div>
       </div>
-      <!-- Step label -->
-      <div id="step-label" class="text-xs text-white/60 font-mono w-48 text-right whitespace-nowrap"></div>
-      <!-- Speed -->
-      <select id="speed-select" onchange="setSpeed(this.value)"
-              class="bg-white/10 border border-white/10 rounded-lg text-xs px-2 py-1 text-white/70 cursor-pointer">
-        <option value="0.5">0.5x</option>
-        <option value="1" selected>1x</option>
-        <option value="2">2x</option>
-        <option value="4">4x</option>
-      </select>
+      <!-- Speed (fixed column — never overlaps step/time line) -->
+      <div class="shrink-0 flex flex-col items-stretch gap-0.5 w-[4.5rem] sm:w-20">
+        <label for="speed-select" class="text-[10px] uppercase tracking-wide text-white/40 text-center">Speed</label>
+        <select id="speed-select" onchange="setSpeed(this.value)"
+                class="bg-white/10 border border-white/10 rounded-lg text-xs px-1.5 py-1.5 text-white/80 cursor-pointer w-full text-center">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+      </div>
     </div>
   </div>
 
@@ -174,7 +220,43 @@
     const NX = 2879;
     const MAX_PIXELS = 50000;
 
+    const BASEMAP_DARK_URL =
+      'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+
+    /** Esri World Imagery (XYZ raster) — no API key; attribution required for display. */
+    const BASEMAP_IMAGERY_STYLE = {
+      version: 8,
+      name: 'World Imagery',
+      // Helps MapLibre / MapboxDraw after setStyle (raster-only styles omit glyphs by default).
+      glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+      sources: {
+        esri: {
+          type: 'raster',
+          tiles: [
+            'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+          ],
+          tileSize: 256,
+          attribution:
+            '<a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>, Maxar, Earthstar Geographics',
+          maxzoom: 19,
+        },
+      },
+      layers: [
+        {
+          id: 'esri_world_imagery',
+          type: 'raster',
+          source: 'esri',
+          minzoom: 0,
+          maxzoom: 22,
+        },
+      ],
+    };
+
     // State
+    let currentBasemap = 'dark';
+    let basemapSwitchSeq = 0;
+    /** True after first style `load`; prevents basemap switch racing initial load / double Draw. */
+    let mapInitialLoadDone = false;
     let currentParam = 't_2m';
     let spatialIndex = null;      // from spatial_index.json
     let stepsArray = null;        // actual forecast hour values [0,1,...,78,81,84,...,120]
@@ -360,28 +442,155 @@
     // =======================================================================
     // Map Initialization
     // =======================================================================
+    function makeDrawControl() {
+      return new MapboxDraw({
+        displayControlsDefault: false,
+        defaultMode: 'simple_select',
+        modes: { ...MapboxDraw.modes },
+      });
+    }
+
+    let drawEventsBound = false;
+
+    function bindDrawEvents() {
+      if (drawEventsBound) return;
+      drawEventsBound = true;
+      map.on('draw.create', onDrawComplete);
+      map.on('draw.modechange', (e) => {
+        const mode = e.mode;
+        if (mode === 'draw_polygon') {
+          map.getContainer().classList.add('draw-area-active');
+        } else {
+          map.getContainer().classList.remove('draw-area-active');
+          setDrawAreaToggleUi(false);
+        }
+      });
+    }
+
+    function attachDrawControl() {
+      if (!map || draw) return;
+      try {
+        draw = makeDrawControl();
+        map.addControl(draw, 'top-left');
+      } catch (err) {
+        console.error('MapboxDraw attach failed:', err);
+        draw = null;
+      }
+    }
+
+    function updateBasemapToggleUI() {
+      const isDark = currentBasemap === 'dark';
+      const btnDark = document.getElementById('btn-basemap-dark');
+      const btnImg = document.getElementById('btn-basemap-imagery');
+      const attrib = document.getElementById('basemap-attrib');
+      if (btnDark) {
+        btnDark.className = `flex-1 py-2 text-sm font-medium transition-all border-r border-white/10 ${
+          isDark ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/60'}`;
+      }
+      if (btnImg) {
+        btnImg.className = `flex-1 py-2 text-sm font-medium transition-all ${
+          !isDark ? 'bg-emerald-500/25 text-emerald-200' : 'text-white/40 hover:text-white/60'}`;
+      }
+      if (attrib) attrib.classList.toggle('hidden', isDark);
+    }
+
+    /**
+     * MapboxDraw must be recreated after setStyle. Uses a sequence id so rapid switches
+     * do not leave the map without a draw control.
+     */
+    window.switchBasemap = function (mode) {
+      if (!map || mode === currentBasemap) return;
+      if (mode !== 'dark' && mode !== 'imagery') return;
+      if (!mapInitialLoadDone) {
+        showToast('Wait for the map to finish loading before changing basemap.', 'info');
+        return;
+      }
+
+      // Forcefully cancel any active drawing state to prevent UI mismatch
+      setDrawAreaToggleUi(false);
+      map.getContainer().classList.remove('draw-area-active');
+
+      currentBasemap = mode;
+      updateBasemapToggleUI();
+
+      const style = mode === 'imagery' ? BASEMAP_IMAGERY_STYLE : BASEMAP_DARK_URL;
+      if (draw) {
+        map.removeControl(draw);
+        draw = null;
+      }
+
+      const seq = ++basemapSwitchSeq;
+
+      // Inline JSON styles can load synchronously; styledata / isStyleLoaded are unreliable alone.
+      // Raster basemaps may keep isStyleLoaded() false while tiles fetch — add a time fallback.
+      let stylePollId = null;
+      const styleSwitchT0 = performance.now();
+
+      const stopStyleWatch = () => {
+        map.off('styledata', onStyleData);
+        if (stylePollId) clearInterval(stylePollId);
+        stylePollId = null;
+      };
+
+      const tryReattachDraw = () => {
+        if (seq !== basemapSwitchSeq) {
+          stopStyleWatch();
+          return;
+        }
+        if (draw) {
+          stopStyleWatch();
+          if (sliceData) renderFrame();
+          return;
+        }
+        const waitedMs = performance.now() - styleSwitchT0;
+        if (!map.isStyleLoaded() && waitedMs < 800) return;
+        attachDrawControl();
+        if (draw) {
+          stopStyleWatch();
+          if (sliceData) renderFrame();
+        }
+      };
+
+      const onStyleData = () => tryReattachDraw();
+      map.on('styledata', onStyleData);
+
+      map.setStyle(style);
+
+      stylePollId = setInterval(tryReattachDraw, 50);
+      setTimeout(() => {
+        if (stylePollId) {
+          clearInterval(stylePollId);
+          stylePollId = null;
+        }
+        map.off('styledata', onStyleData);
+        tryReattachDraw();
+        if (seq === basemapSwitchSeq && !draw) {
+          console.warn('MapboxDraw did not re-attach after basemap switch; retrying on idle');
+          map.once('idle', tryReattachDraw);
+        }
+      }, 4000);
+
+      queueMicrotask(tryReattachDraw);
+      setTimeout(tryReattachDraw, 0);
+      requestAnimationFrame(() => requestAnimationFrame(tryReattachDraw));
+    };
+
     function initMap() {
       map = new maplibregl.Map({
         container: 'map',
-        style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+        style: BASEMAP_DARK_URL,
         center: [13.4, 52.5],  // Berlin
         zoom: 5,
         attributionControl: false,
       });
 
-      draw = new MapboxDraw({
-        displayControlsDefault: false,
-        defaultMode: 'simple_select',
-        modes: { ...MapboxDraw.modes },
-      });
-      map.addControl(draw, 'top-left');
-      // Hide the default draw controls (we have our own button)
-      setTimeout(() => {
-        document.querySelector('.mapboxgl-ctrl-group')?.remove();
-      }, 100);
-
-      map.on('draw.create', onDrawComplete);
       map.on('move', renderFrame);
+
+      map.once('load', () => {
+        mapInitialLoadDone = true;
+        attachDrawControl();
+        bindDrawEvents();
+      });
 
       // Canvas setup
       canvas = document.getElementById('data-canvas');
@@ -389,11 +598,24 @@
       resizeCanvas();
       window.addEventListener('resize', resizeCanvas);
 
+      const opacityEl = document.getElementById('layer-opacity');
+      if (opacityEl) {
+        opacityEl.addEventListener('input', () => {
+          const lab = document.getElementById('opacity-label');
+          if (lab) lab.textContent = `${opacityEl.value}%`;
+          renderFrame();
+        });
+      }
+      document.getElementById('chk-smooth')?.addEventListener('change', () => renderFrame());
+      document.getElementById('chk-contours')?.addEventListener('change', () => renderFrame());
+
       // Tooltip hover
       canvas.addEventListener('mousemove', onCanvasHover);
       canvas.addEventListener('mouseleave', () => {
         document.getElementById('tooltip').classList.add('hidden');
       });
+
+      updateBasemapToggleUI();
     }
 
     function resizeCanvas() {
@@ -405,14 +627,38 @@
     // =======================================================================
     // Drawing Tool
     // =======================================================================
-    window.activateDraw = function() {
+    function setDrawAreaToggleUi(drawingOn) {
+      const btn = document.getElementById('btn-draw');
+      const label = document.getElementById('btn-draw-label');
+      if (!btn) return;
+      if (label) label.textContent = drawingOn ? 'Cancel drawing' : 'Draw area';
+      btn.setAttribute('aria-pressed', drawingOn ? 'true' : 'false');
+      btn.classList.toggle('pulse-active', !!drawingOn);
+    }
+
+    window.toggleDrawArea = function() {
+      if (!map) return;
+      if (!draw) {
+        showToast('Map is still loading — wait a second and try again.', 'info');
+        return;
+      }
+      const mode = draw.getMode();
+      if (mode === 'draw_polygon') {
+        draw.deleteAll();
+        draw.changeMode('simple_select');
+        map.getContainer().classList.remove('draw-area-active');
+        setDrawAreaToggleUi(false);
+        return;
+      }
       draw.deleteAll();
-      draw.changeMode('draw_rectangle');
-      document.getElementById('btn-draw').classList.add('pulse-active');
+      draw.changeMode('draw_polygon');
+      map.getContainer().classList.add('draw-area-active');
+      setDrawAreaToggleUi(true);
     };
 
     async function onDrawComplete(e) {
-      document.getElementById('btn-draw').classList.remove('pulse-active');
+      setDrawAreaToggleUi(false);
+      map.getContainer().classList.remove('draw-area-active');
 
       const feature = e.features[0];
       if (!feature || feature.geometry.type !== 'Polygon') return;
@@ -438,6 +684,7 @@
       if (totalPixels > MAX_PIXELS) {
         showToast(`Selected area is too large (${totalPixels.toLocaleString()} pixels). Draw a smaller region (max ~220×220).`, 'error');
         draw.deleteAll();
+        setDrawAreaToggleUi(false);
         return;
       }
 
@@ -519,7 +766,141 @@
       const cssColor = colorScale(v);
       const c = d3.color(cssColor);
       if (!c) return [0, 0, 0, 0];
-      return [c.r, c.g, c.b, currentParam === 'tot_prec' ? Math.min(255, Math.round(180 + 75 * (v / dataMax))) : 200];
+      const dm = dataMax || 1;
+      const baseA = currentParam === 'tot_prec'
+        ? Math.min(255, Math.round(180 + 75 * (v / dm)))
+        : 200;
+      return [c.r, c.g, c.b, baseA];
+    }
+
+    function getLayerOpacity() {
+      const el = document.getElementById('layer-opacity');
+      if (!el) return 0.85;
+      return Math.max(0, Math.min(1, parseInt(el.value, 10) / 100));
+    }
+
+    function isSmoothField() {
+      const el = document.getElementById('chk-smooth');
+      return !el || el.checked;
+    }
+
+    function wantContours() {
+      const el = document.getElementById('chk-contours');
+      return !!(el && el.checked);
+    }
+
+    function bilinearSample(arr, base, nLat, nLon, fi, fj) {
+      fi = Math.min(Math.max(fi, 0), nLat - 1 - 1e-9);
+      fj = Math.min(Math.max(fj, 0), nLon - 1 - 1e-9);
+      const i0 = Math.floor(fi);
+      const i1 = Math.min(i0 + 1, nLat - 1);
+      const j0 = Math.floor(fj);
+      const j1 = Math.min(j0 + 1, nLon - 1);
+      const ti = fi - i0;
+      const tj = fj - j0;
+      const at = (i, j) => arr[base + i * nLon + j];
+      const ok = (x) => !isNaN(x) && isFinite(x);
+      const v00 = at(i0, j0), v01 = at(i0, j1), v10 = at(i1, j0), v11 = at(i1, j1);
+      const w00 = ok(v00) ? (1 - ti) * (1 - tj) : 0;
+      const w01 = ok(v01) ? (1 - ti) * tj : 0;
+      const w10 = ok(v10) ? ti * (1 - tj) : 0;
+      const w11 = ok(v11) ? ti * tj : 0;
+      const wsum = w00 + w01 + w10 + w11;
+      if (wsum < 1e-12) return NaN;
+      return (w00 * (ok(v00) ? v00 : 0) + w01 * (ok(v01) ? v01 : 0)
+        + w10 * (ok(v10) ? v10 : 0) + w11 * (ok(v11) ? v11 : 0)) / wsum;
+    }
+
+    function contourMaskSegments(mask) {
+      switch (mask) {
+        case 0: case 15: return [];
+        case 1: case 14: return [[3, 0]];
+        case 2: case 13: return [[0, 1]];
+        case 3: case 12: return [[1, 3]];
+        case 4: case 11: return [[1, 2]];
+        case 5: return [[0, 3], [1, 2]];
+        case 6: case 9: return [[0, 2]];
+        case 7: case 8: return [[2, 3]];
+        case 10: return [[0, 1], [2, 3]];
+        default: return [];
+      }
+    }
+
+    function edgeIsoPoint(pA, vA, pB, vB, L) {
+      if ((vA - L) * (vB - L) > 0) return null;
+      if (Math.abs(vA - vB) < 1e-9) return null;
+      const t = (L - vA) / (vB - vA);
+      if (t < 0 || t > 1) return null;
+      return { x: pA.x + t * (pB.x - pA.x), y: pA.y + t * (pB.y - pA.y) };
+    }
+
+    function drawContoursOverlay(stepBase, nLat, nLon, latStart, lonStart) {
+      const nlev = 7;
+      const levels = [];
+      const span = dataMax - dataMin;
+      if (span <= 0 || !isFinite(span)) return;
+
+      for (let k = 1; k < nlev; k++) {
+        levels.push(dataMin + (span * k) / nlev);
+      }
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+      ctx.lineWidth = 1;
+      ctx.lineJoin = 'round';
+
+      const gv = (ii, jj) => {
+        const raw = sliceData[stepBase + ii * nLon + jj];
+        if (isNaN(raw)) return NaN;
+        return currentParam === 't_2m' ? raw - 273.15 : raw;
+      };
+      const pj = (ii, jj) =>
+        map.project([indexToLon(lonStart + jj), indexToLat(latStart + ii)]);
+
+      let stride = 1;
+      if (nLat * nLon > 12000) stride = 2;
+      if (nLat * nLon > 48000) stride = 3;
+
+      for (const L of levels) {
+        ctx.beginPath();
+        for (let i = 0; i < nLat - stride; i += stride) {
+          for (let j = 0; j < nLon - stride; j += stride) {
+            const v00 = gv(i, j);
+            const v10 = gv(i, j + stride);
+            const v11 = gv(i + stride, j + stride);
+            const v01 = gv(i + stride, j);
+            if ([v00, v10, v11, v01].some((x) => isNaN(x))) continue;
+
+            const p00 = pj(i, j);
+            const p10 = pj(i, j + stride);
+            const p11 = pj(i + stride, j + stride);
+            const p01 = pj(i + stride, j);
+
+            const e0 = edgeIsoPoint(p00, v00, p10, v10, L);
+            const e1 = edgeIsoPoint(p10, v10, p11, v11, L);
+            const e2 = edgeIsoPoint(p01, v01, p11, v11, L);
+            const e3 = edgeIsoPoint(p00, v00, p01, v01, L);
+            const edges = [e0, e1, e2, e3];
+
+            const b0 = v00 >= L ? 1 : 0;
+            const b1 = v10 >= L ? 1 : 0;
+            const b2 = v11 >= L ? 1 : 0;
+            const b3 = v01 >= L ? 1 : 0;
+            const mask = b0 | (b1 << 1) | (b2 << 2) | (b3 << 3);
+
+            for (const [ea, eb] of contourMaskSegments(mask)) {
+              const pa = edges[ea];
+              const pb = edges[eb];
+              if (pa && pb) {
+                ctx.moveTo(pa.x, pa.y);
+                ctx.lineTo(pb.x, pb.y);
+              }
+            }
+          }
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
     }
 
     // =======================================================================
@@ -531,26 +912,33 @@
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       const { nLat, nLon, latStart, lonStart } = sliceBounds;
-      const nSteps = stepsArray ? stepsArray.length : 93;
       const stepBase = currentStep * nLat * nLon;
+      const layerOp = getLayerOpacity();
+      const smooth = isSmoothField();
+      const ss = smooth ? 2 : 1;
+      const imgW = (nLon - 1) * ss + 1;
+      const imgH = (nLat - 1) * ss + 1;
 
-      // Create ImageData for the slice
-      const imgData = new ImageData(nLon, nLat);
+      const imgData = new ImageData(imgW, imgH);
       const pixels = imgData.data;
 
-      for (let i = 0; i < nLat; i++) {
-        for (let j = 0; j < nLon; j++) {
-          const val = sliceData[stepBase + i * nLon + j];
-          const [r, g, b, a] = valueToColor(val);
-          const idx = (i * nLon + j) * 4;
-          pixels[idx]     = r;
+      for (let py = 0; py < imgH; py++) {
+        for (let px = 0; px < imgW; px++) {
+          const fj = px / ss;
+          const fi = py / ss;
+          const val = smooth
+            ? bilinearSample(sliceData, stepBase, nLat, nLon, fi, fj)
+            : sliceData[stepBase + Math.round(fi) * nLon + Math.round(fj)];
+          const [r, g, b, a0] = valueToColor(val);
+          const a = Math.round(a0 * layerOp);
+          const idx = (py * imgW + px) * 4;
+          pixels[idx] = r;
           pixels[idx + 1] = g;
           pixels[idx + 2] = b;
           pixels[idx + 3] = a;
         }
       }
 
-      // Project geographic corners to screen pixels
       const nw = map.project([indexToLon(lonStart), indexToLat(latStart)]);
       const se = map.project([indexToLon(lonStart + nLon), indexToLat(latStart + nLat)]);
 
@@ -559,13 +947,17 @@
 
       if (screenW <= 0 || screenH <= 0) return;
 
-      // Use offscreen canvas to blit scaled ImageData
-      const offscreen = new OffscreenCanvas(nLon, nLat);
+      const offscreen = new OffscreenCanvas(imgW, imgH);
       const offCtx = offscreen.getContext('2d');
       offCtx.putImageData(imgData, 0, 0);
 
-      ctx.imageSmoothingEnabled = false;
+      ctx.imageSmoothingEnabled = smooth;
+      ctx.imageSmoothingQuality = smooth ? 'high' : 'low';
       ctx.drawImage(offscreen, nw.x, nw.y, screenW, screenH);
+
+      if (wantContours()) {
+        drawContoursOverlay(stepBase, nLat, nLon, latStart, lonStart);
+      }
     }
 
     // =======================================================================
@@ -640,8 +1032,10 @@
       const opts = { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' };
       const formatted = validTime.toLocaleDateString('en-US', opts) + ' UTC';
 
-      document.getElementById('step-label').textContent =
-        `Step ${currentStep} (T+${hour}h) — ${formatted}`;
+      const stepText = `Step ${currentStep} (T+${hour}h) — ${formatted}`;
+      const stepEl = document.getElementById('step-label');
+      stepEl.textContent = stepText;
+      stepEl.title = stepText;
       document.getElementById('clock-time').textContent = formatted;
       document.getElementById('clock-meta').textContent =
         `T+${hour}h | ICON ${spatialIndex.run.slice(8)}Z Run`;

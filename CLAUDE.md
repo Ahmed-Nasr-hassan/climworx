@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ClimWorx is a serverless weather data pipeline that fetches ICON Global / ICON-EPS GRIB2 NWP data from DWD, regrids it to a 0.125° lat/lon grid, stores it as cloud-optimized Zarr in Cloudflare R2, and serves it via a Cloudflare Workers edge API.
+ClimWorx is a serverless weather data pipeline that fetches ICON Global / ICON-EPS GRIB2 NWP data from DWD, regrids it to a 0.125° lat/lon grid, stores it as cloud-optimized Zarr in Cloudflare R2, and serves it via a Cloudflare Workers edge API. A single-file weather dashboard (`index.html`) visualizes the data on an interactive map.
 
 ## Running the ETL Pipeline
 
@@ -19,7 +19,7 @@ apt-get install cdo  # CDO >= 2.0
 PARAMETER=tot_prec MODEL_RUN=00 python etl.py
 
 # Run validation + promotion (after all staged params are done)
-MODEL_RUN=00 python etl.py --validate-only --params tot_prec
+MODEL_RUN=00 python etl.py --validate-only --params tot_prec t_2m
 
 # Run with ensemble members (40 members, ~40× more storage)
 PARAMETER=tot_prec MODEL_RUN=00 ENABLE_ENSEMBLE=true python etl.py
@@ -97,7 +97,7 @@ ICON GRIB2 files reference their native icosahedral grid only by UUID — CDO ca
 
 ### CI/CD
 
-GitHub Actions (`.github/workflows/main.yml`) runs 4×/day at 02:15, 08:15, 14:15, 20:15 UTC. Currently processing only `tot_prec` (matrix parameter list is intentionally narrowed). Promotion only runs if all matrix ETL jobs succeed.
+GitHub Actions (`.github/workflows/main.yml`) runs 4×/day at 02:15, 08:15, 14:15, 20:15 UTC. Currently processing `tot_prec` and `t_2m`. Promotion only runs if all matrix ETL jobs succeed.
 
 ### R2 Storage Layout
 
@@ -109,24 +109,44 @@ icon-global-databank/
 └── spatial_index.json              # Grid + steps metadata for Worker
 ```
 
+### Zarr Store Structure
+
+Each parameter is a Zarr v2 group. The data variable is nested inside: `runs/{run}/{param}/{param}/.zarray`. Dimension shapes differ by parameter:
+
+- `t_2m`: shape `[steps, 1, 1441, 2879]` — 4D with singleton `height` dimension, chunk key format `0.0.{ci}.{cj}`
+- `tot_prec`: shape `[steps, 1441, 2879]` — 3D (no height), chunk key format `0.{ci}.{cj}`
+
+Zarr v2, dimension separator `.`, dtype `<f4` (little-endian float32), C-order, GZip level 5 compression. The `_SUCCESS` marker is per-parameter at `runs/{run}/{param}/_SUCCESS`.
+
 ### Worker API (`worker/index.ts`)
 
-`GET /?lat=&lon=&param=[&ensemble=true][&run=YYYYMMDDHH]`
+The Worker exposes two routes:
 
-Request flow: rate limit check (100 req/min per IP via KV) → validate params → resolve run ID (KV cache, 5-min TTL) → convert lat/lon to chunk index via `latLonToChunkIndex()` → check Cloudflare Cache API (1h TTL, per-pixel cache key) → byte-range read from R2 → decompress Blosc chunk → extract time series → return JSON.
+**Per-pixel JSON API:** `GET /?lat=&lon=&param=[&ensemble=true][&run=YYYYMMDDHH]`
+
+Request flow: rate limit (100 req/min per IP via KV) → validate params → resolve run ID (KV cache, 5-min TTL) → `latLonToChunkIndex()` → Cache API (1h TTL, per-pixel key) → fetch chunk from R2 → decompress GZip via native `DecompressionStream` → `extractTimeSeries()` using strides derived from `.zarray` chunk shape (handles any number of dimensions) → return JSON.
+
+**Zarr proxy (for dashboard):** `GET /zarr/{param}/{...path}` — proxies R2 `runs/{latestRun}/{param}/{path}` with CORS headers (`Access-Control-Allow-Origin: *`). `GET /zarr/spatial_index.json` serves run metadata from bucket root. `OPTIONS` returns CORS preflight.
 
 **Chunk decompression:** The Worker uses the native `DecompressionStream("gzip")` API — no WASM or external dependencies needed. ETL compresses with `numcodecs.GZip(level=5)`.
 
+### Weather Dashboard (`index.html`)
+
+Single-file interactive dashboard using MapLibre GL JS, Tailwind CSS, D3 color scales, and Pako (GZip decompression). Reads Zarr chunks directly via the `/zarr/*` proxy — no zarr.js library dependency.
+
+- Dark Carto basemap with glassmorphism UI panels
+- Draw a bounding box → fetches Zarr chunks in parallel (batches of 6) via `/zarr/*` proxy
+- Handles both 4D (`t_2m`) and 3D (`tot_prec`) dimension layouts automatically
+- Animated playback with non-uniform step awareness (hourly 0–78h, 3-hourly 81–120h)
+- Color scales: `d3.interpolateTurbo` (temperature K→°C), `d3.interpolateYlGnBu` (precipitation, transparent at zero)
+- Hover tooltip with lat/lon, value, and sparkline time series for all 93 steps
+- 50,000-pixel area guard with toast notifications
+
 ### Data Constants
 
-- **Grid:** 2879×1441 (0.125° resolution, north→south, west→east; `-180.0` to `179.75` longitude)
-  - Note: `worker/index.ts` currently has `GRID_NX = 2880` — **pending fix** to match `etl.py`
+- **Grid:** 2879×1441 (0.125° resolution, north→south, west→east; `-180.0` to `179.875` longitude)
 - **CDO target grid:** xfirst=-180.0, xinc=0.125, xsize=2879; yfirst=90.0, yinc=-0.125, ysize=1441 (N→S)
 - **Forecast steps:** 97 total for 00Z/12Z (+0…+78h hourly, +81…+180h every 3h); 57 steps for 06Z/18Z (max +120h)
 - **Active parameters (CI):** `tot_prec`, `t_2m` (others: `u_10m`, `v_10m`, `pmsl`, `clct`, `relhum_2m`, `aswdir_s`)
 - **Chunk size:** 100×100 lat/lon pixels, full step dimension
-- **Compression:** GZip level 5 (`from numcodecs import GZip`) — native `DecompressionStream` in Worker, no WASM needed
-
-### Known Issues / Pending
-
-- `worker/index.ts` line 26: `GRID_NX = 2880` must be updated to `2879` to match `etl.py` and CDO target grid
+- **Compression:** GZip level 5 (`from numcodecs import GZip`) — native `DecompressionStream` in Worker, `pako.ungzip` in dashboard
