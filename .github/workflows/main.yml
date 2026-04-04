@@ -3,10 +3,10 @@ name: ICON Global Weather ETL
 on:
   schedule:
     # 4 daily runs aligned with DWD model release schedule (~2h after init)
-    - cron: "15 2  * * *"   # 00Z model run
-    - cron: "15 8  * * *"   # 06Z model run
-    - cron: "15 14 * * *"   # 12Z model run
-    - cron: "15 20 * * *"   # 18Z model run
+    - cron: "15 5  * * *"   # 00Z model run
+    - cron: "15 11 * * *"   # 06Z model run
+    - cron: "15 17 * * *"   # 12Z model run
+    - cron: "15 23 * * *"   # 18Z model run
   workflow_dispatch:
     inputs:
       model_run:
