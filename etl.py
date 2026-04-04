@@ -76,7 +76,7 @@ BUCKET = "icon-global-databank"
 # Physical plausibility bounds per parameter (min, max)
 PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "t_2m":      (180.0, 340.0),   # K
-    "tot_prec":  (0.0, 500.0),     # mm
+    "tot_prec":  (0.0, 4000.0),    # mm (global multi-day accumulation)
     "u_10m":     (-150.0, 150.0),  # m/s
     "v_10m":     (-150.0, 150.0),  # m/s
     "pmsl":      (85000.0, 108000.0),  # Pa
