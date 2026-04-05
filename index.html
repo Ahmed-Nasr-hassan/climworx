@@ -1091,6 +1091,13 @@
         renderLegend();
         renderFrame();
 
+        // Clear the drawn rectangle — the color overlay is now the selection
+        draw.deleteAll();
+        setDrawAreaToggleUi(false);
+
+        // Close the controls panel so the map is fully visible
+        if (panelVisible) togglePanel();
+
         // Auto-play animation
         if (!playing) togglePlay();
       } catch (err) {
@@ -1580,9 +1587,21 @@
         // Measure after un-hiding so we know the real height
         const ttW = tooltip.offsetWidth;
         const ttH = tooltip.offsetHeight;
-        const FINGER_GAP = 16; // px clearance above fingertip
+        const FINGER_GAP = 90; // px clearance above fingertip
+
+        // Keep tooltip above the playback panel
+        const playbackEl = document.getElementById('playback');
+        const panelTop = playbackEl && !playbackEl.classList.contains('hidden')
+          ? playbackEl.getBoundingClientRect().top
+          : window.innerHeight;
+        const maxBottom = panelTop - 8; // 8px above panel top edge
+
+        // Prefer above finger; if that would clip the top, push down but still
+        // stay above the panel
+        let ty = e.clientY - ttH - FINGER_GAP;
+        ty = Math.max(8, ty);                          // don't go above screen
+        ty = Math.min(ty, maxBottom - ttH);            // don't overlap panel
         const tx = Math.max(8, Math.min(e.clientX - ttW / 2, window.innerWidth - ttW - 8));
-        const ty = Math.max(8, e.clientY - ttH - FINGER_GAP);
         tooltip.style.left = `${tx}px`;
         tooltip.style.top  = `${ty}px`;
       } else {
