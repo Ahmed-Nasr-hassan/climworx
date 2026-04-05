@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>ClimWorx — ICON Global Weather Dashboard</title>
   <link rel="preconnect" href="https://basemaps.cartocdn.com" crossorigin />
   <link rel="preconnect" href="https://tiles.basemaps.cartocdn.com" crossorigin />
@@ -219,7 +219,7 @@
 
   <!-- ====== Playback Bar (bottom) ====== -->
   <div id="playback" class="glass absolute bottom-0 left-0 right-0 z-30 px-3 py-2 sm:px-6 sm:py-3 hidden"
-       style="border-radius: 1rem 1rem 0 0;">
+       style="border-radius: 1rem 1rem 0 0; padding-bottom: max(0.5rem, env(safe-area-inset-bottom));">
     <!-- Mobile: stack vertically; Desktop: single row -->
     <div class="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 w-full min-w-0">
       <!-- Top row on mobile: play + slider + speed -->
@@ -815,6 +815,26 @@
       mapContainer.addEventListener('touchend', () => {
         document.getElementById('tooltip').classList.add('hidden');
       });
+
+      // On mobile: hide the panel during map interaction, restore when done.
+      // Only auto-hide if the user had it open; if already closed, leave it.
+      let panelHiddenByMap = false;
+      function isMobile() { return window.innerWidth < 640; }
+
+      function onMapInteractionStart() {
+        if (!isMobile() || !panelVisible || panelHiddenByMap) return;
+        panelHiddenByMap = true;
+        document.getElementById('controls').classList.add('hidden');
+      }
+
+      function onMapInteractionEnd() {
+        if (!isMobile() || !panelHiddenByMap) return;
+        panelHiddenByMap = false;
+        document.getElementById('controls').classList.remove('hidden');
+      }
+
+      map.on('movestart', onMapInteractionStart);
+      map.on('moveend',   onMapInteractionEnd);
 
       updateBasemapToggleUI();
     }
