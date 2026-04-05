@@ -514,12 +514,6 @@ def upload_to_staging(
         f.write(datetime.now(timezone.utc).isoformat())
     log.info("_SUCCESS marker written: %s", marker_key)
 
-    # Write the resolved run_dt so the promote job uses the same run, not the
-    # raw CI run_dt (which may differ if DWD fallback was triggered).
-    resolved_key = f"{BUCKET}/staging/{run_dt}/_RESOLVED_RUN"
-    with fs.open(resolved_key, "w") as f:
-        f.write(run_dt)
-
     return staging_path
 
 
@@ -835,6 +829,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     if not args.validate_only:
         # Probe DWD and fall back to an older run if the requested one isn't published yet
+        original_run_dt = run_dt
         resolved_run_dt = resolve_available_run(run_date, args.model_run, param, model)
         if resolved_run_dt != run_dt:
             log.info("Resolved run_dt: %s → %s", run_dt, resolved_run_dt)
@@ -849,6 +844,16 @@ def main() -> None:
                 ds = process_deterministic(run_dt, param, fs, all_steps)
 
             staging_path = upload_to_staging(ds, run_dt, param, ensemble, fs)
+
+            # Write _RESOLVED_RUN under the *original* CI run_dt path so the
+            # validation job (which only knows the CI run_dt) can discover
+            # which run was actually staged when DWD fallback occurred.
+            if original_run_dt != run_dt:
+                resolved_key = f"{BUCKET}/staging/{original_run_dt}/_RESOLVED_RUN"
+                with fs.open(resolved_key, "w") as f:
+                    f.write(run_dt)
+                log.info("_RESOLVED_RUN redirect written: %s → %s", resolved_key, run_dt)
+
             elapsed = time.monotonic() - t0
             log.info(
                 "Staging complete: %s  (%.1fs, %.1f MB in-memory)",
