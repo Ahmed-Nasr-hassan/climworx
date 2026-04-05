@@ -194,7 +194,7 @@ async function fetchZarrMeta(
   const obj = await env.DATABANK.get(`runs/${runId}/${param}/${param}/.zarray`);
   if (!obj) throw new Error(`Zarr metadata not found for ${param} in run ${runId}`);
   const text = await obj.text();
-  await env.METADATA.put(cacheKey, text, { expirationTtl: 3600 });
+  await env.METADATA.put(cacheKey, text, { expirationTtl: 300 });
   return JSON.parse(text) as ZarrArrayMeta;
 }
 
@@ -395,7 +395,11 @@ async function handleZarrProxy(
     const obj = await env.DATABANK.get("spatial_index.json");
     if (!obj) return jsonError(404, "spatial_index.json not found");
     return new Response(obj.body, {
-      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+        ...CORS_HEADERS,
+      },
     });
   }
 
@@ -418,11 +422,14 @@ async function handleZarrProxy(
 
   const isMetadata = /\.(zarray|zattrs|zmetadata|zgroup)$/.test(objPath);
   const contentType = isMetadata ? "application/json" : "application/octet-stream";
+  // Metadata files must not be cached by CDN: the proxy URL has no run-version,
+  // so a stale .zarray would cause the dashboard to read the wrong step count.
+  const cacheControl = isMetadata ? "no-store" : "public, max-age=3600";
 
   return new Response(obj.body, {
     headers: {
       "Content-Type": contentType,
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": cacheControl,
       ...CORS_HEADERS,
     },
   });

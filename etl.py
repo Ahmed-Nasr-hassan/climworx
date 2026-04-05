@@ -67,8 +67,11 @@ LON_MIN, LON_MAX = -180.0, 180.0
 CHUNK_LAT = 100
 CHUNK_LON = 100
 ENSEMBLE_MEMBERS = 40
-KEEP_RUNS_DEFAULT = 2
+KEEP_RUNS_DEFAULT = 1
 MAX_RETRIES = 3
+# Promotion is blocked if more than this fraction of expected steps are missing.
+# Catches partial DWD uploads: e.g. 34/93 steps (63% missing) fails immediately.
+MAX_MISSING_STEP_FRACTION = 0.15
 RETRY_BASE_S = 30
 RETRY_MAX_S = 300
 BUCKET = "icon-global-databank"
@@ -555,10 +558,19 @@ def validate_run(
             )
         missing = expected_steps - actual_steps
         if missing:
+            missing_fraction = len(missing) / len(expected_steps)
+            if missing_fraction > MAX_MISSING_STEP_FRACTION:
+                raise ValueError(
+                    f"[{param}] Too many forecast steps missing: "
+                    f"{len(missing)}/{len(expected_steps)} "
+                    f"({missing_fraction:.0%}) — DWD upload likely incomplete. "
+                    f"Missing: {sorted(missing)[:10]}{'…' if len(missing) > 10 else ''}"
+                )
             log.warning(
-                "[%s] %d forecast steps absent from Zarr (skipped on DWD): %s%s",
+                "[%s] %d/%d forecast steps absent from Zarr (skipped on DWD): %s%s",
                 param,
                 len(missing),
+                len(expected_steps),
                 sorted(missing)[:15],
                 "…" if len(missing) > 15 else "",
             )
@@ -649,6 +661,10 @@ def build_spatial_index(run_dt: str, params: list[str], fs: s3fs.S3FileSystem) -
     This is a small JSON that the CF Worker loads to resolve lat/lon → chunk.
     ``steps`` are taken from the first readable promoted Zarr (matches skipped DWD steps).
     """
+    # Invalidate the s3fs listing/content cache for the promoted paths so we
+    # don't read stale consolidated metadata written before the copy in promote_run.
+    fs.invalidate_cache(f"{BUCKET}/runs/{run_dt}")
+
     steps_in_store: list[int] = []
     for ref_param in params:
         try:

@@ -2,11 +2,11 @@ name: ICON Global Weather ETL
 
 on:
   schedule:
-    # 4 daily runs aligned with DWD model release schedule (~2h after init)
-    - cron: "15 5  * * *"   # 00Z model run
-    - cron: "15 11 * * *"   # 06Z model run
-    - cron: "15 17 * * *"   # 12Z model run
-    - cron: "15 23 * * *"   # 18Z model run
+    # 4 daily runs aligned with DWD model release schedule (~4h after init)
+    - cron: "15 6  * * *"   # 00Z model run  (init 00Z, DWD done ~04–05Z)
+    - cron: "15 12 * * *"   # 06Z model run  (init 06Z, DWD done ~10–11Z)
+    - cron: "15 18 * * *"   # 12Z model run  (init 12Z, DWD done ~16–17Z)
+    - cron: "15 0  * * *"   # 18Z model run  (init 18Z, DWD done ~22–23Z)
   workflow_dispatch:
     inputs:
       model_run:
@@ -31,7 +31,7 @@ env:
   R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
   ALERT_WEBHOOK_URL:    ${{ secrets.ALERT_WEBHOOK_URL }}
   ENABLE_ENSEMBLE:      ${{ github.event.inputs.enable_ensemble || 'false' }}
-  KEEP_RUNS:            "2"
+  KEEP_RUNS:            "1"
   PYTHON_VERSION:       "3.11"
 
 # ---------------------------------------------------------------------------

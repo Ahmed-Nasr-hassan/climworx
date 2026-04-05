@@ -51,7 +51,6 @@
     }
     /* Canvas overlay must not capture pointer events except when hovering data */
     #data-canvas { pointer-events: none; image-rendering: pixelated; }
-    #data-canvas.interactive { pointer-events: auto; }
     /* Timeline slider styling */
     input[type="range"] { -webkit-appearance: none; background: transparent; }
     input[type="range"]::-webkit-slider-runnable-track {
@@ -800,18 +799,20 @@
       document.getElementById('chk-smooth')?.addEventListener('change', () => renderFrame());
       document.getElementById('chk-contours')?.addEventListener('change', () => renderFrame());
 
-      // Tooltip hover (mouse + touch)
-      canvas.addEventListener('mousemove', onCanvasHover);
-      canvas.addEventListener('mouseleave', () => {
+      // Tooltip hover (mouse + touch) — attached to map container so the canvas
+      // never needs to capture pointer events (which would block map panning).
+      const mapContainer = map.getContainer();
+      mapContainer.addEventListener('mousemove', onCanvasHover);
+      mapContainer.addEventListener('mouseleave', () => {
         document.getElementById('tooltip').classList.add('hidden');
       });
-      canvas.addEventListener('touchmove', (e) => {
+      mapContainer.addEventListener('touchmove', (e) => {
         if (e.touches.length === 1) {
           const t = e.touches[0];
           onCanvasHover({ clientX: t.clientX, clientY: t.clientY });
         }
       }, { passive: true });
-      canvas.addEventListener('touchend', () => {
+      mapContainer.addEventListener('touchend', () => {
         document.getElementById('tooltip').classList.add('hidden');
       });
 
@@ -909,7 +910,6 @@
         document.getElementById('playback').classList.remove('hidden');
         document.getElementById('clock').classList.remove('hidden');
         document.getElementById('legend').classList.remove('hidden');
-        canvas.classList.add('interactive');
 
         document.getElementById('area-info').classList.remove('hidden');
         document.getElementById('area-info').textContent =

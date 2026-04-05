@@ -69,7 +69,7 @@ The `wrangler.toml` (not committed) must bind R2 as `DATABANK` and KV as `METADA
 | `MODEL_RUN` | No | `00`, `06`, `12`, or `18` |
 | `RUN_DATE` | No | `YYYYMMDD`, defaults to today UTC |
 | `ENABLE_ENSEMBLE` | No | `true` to process 40 ensemble members |
-| `KEEP_RUNS` | No | Runs to retain, default `2` |
+| `KEEP_RUNS` | No | Runs to retain, default `1` |
 
 ## Architecture
 
@@ -97,7 +97,7 @@ ICON GRIB2 files reference their native icosahedral grid only by UUID — CDO ca
 
 ### CI/CD
 
-GitHub Actions (`.github/workflows/main.yml`) runs 4×/day at 02:15, 08:15, 14:15, 20:15 UTC. Currently processing `tot_prec` and `t_2m`. Promotion only runs if all matrix ETL jobs succeed.
+GitHub Actions (`.github/workflows/main.yml`) runs 4×/day at 06:15, 12:15, 18:15, 00:15 UTC (~4h after each model init). Currently processing `tot_prec` and `t_2m`. Promotion only runs if all matrix ETL jobs succeed and validation passes (fails hard if >15% of expected steps are missing — catches partial DWD uploads).
 
 ### R2 Storage Layout
 
@@ -134,7 +134,8 @@ Request flow: rate limit (100 req/min per IP via KV) → validate params → res
 
 Single-file interactive dashboard using MapLibre GL JS, Tailwind CSS, D3 color scales, and Pako (GZip decompression). Reads Zarr chunks directly via the `/zarr/*` proxy — no zarr.js library dependency.
 
-- Dark Carto basemap with glassmorphism UI panels
+- **Basemap toggle** — Imagery (default) ↔ Dark Carto (`switchBasemap()`). Dark style is prefetched/preloaded on page load to eliminate render delay. `MapboxDraw` is recreated and re-attached after each style switch via a `styledata` listener + poll guard. A sequence counter (`basemapSwitchSeq`) prevents stale callbacks from racing.
+- Glassmorphism UI panels; responsive mobile layout (play/slider/speed on top row, step label below on mobile, inline on desktop)
 - Draw a bounding box → fetches Zarr chunks in parallel (batches of 6) via `/zarr/*` proxy
 - Handles both 4D (`t_2m`) and 3D (`tot_prec`) dimension layouts automatically
 - Animated playback with non-uniform step awareness (hourly 0–78h, 3-hourly 81–120h)
