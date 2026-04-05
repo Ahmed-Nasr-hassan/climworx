@@ -91,6 +91,18 @@
   <!-- ====== Canvas overlay (synced to map) ====== -->
   <canvas id="data-canvas" class="absolute inset-0 z-10"></canvas>
 
+  <!-- ====== Mobile drawing overlay (shown only while drawing on mobile) ====== -->
+  <div id="drawing-overlay" class="sm:hidden hidden absolute inset-x-0 top-0 z-50 flex flex-col items-center gap-2 pt-3 px-4 pointer-events-none">
+    <button type="button" onclick="toggleDrawArea()"
+            class="pointer-events-auto w-full max-w-xs flex items-center justify-center gap-2 py-3 rounded-2xl bg-red-500/80 backdrop-blur text-white font-semibold text-sm shadow-xl active:scale-95 transition-transform">
+      <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/></svg>
+      Cancel Drawing
+    </button>
+    <div class="pointer-events-none bg-black/50 backdrop-blur-sm text-white/80 text-xs px-4 py-2 rounded-xl text-center leading-snug shadow">
+      Tap to add points &nbsp;·&nbsp; Double-tap to finish
+    </div>
+  </div>
+
   <!-- ====== Mobile toggle button (top-left, visible only on small screens) ====== -->
   <button id="btn-toggle-panel" onclick="togglePanel()"
           class="glass sm:hidden absolute top-2 left-2 z-40 w-10 h-10 rounded-xl flex items-center justify-center shadow-xl text-white/70 hover:text-white transition-all">
@@ -337,6 +349,7 @@
     let currentRamp = 'auto';             // 'auto' picks per-param default
     let map, draw, canvas, ctx;
     let panelVisible = false; // mobile panel state (desktop always visible via sm:block)
+    function isMobile() { return window.innerWidth < 640; }
 
     // =======================================================================
     // Lat/Lon ↔ Array Index Math
@@ -819,7 +832,6 @@
       // On mobile: hide the panel during map interaction, restore when done.
       // Only auto-hide if the user had it open; if already closed, leave it.
       let panelHiddenByMap = false;
-      function isMobile() { return window.innerWidth < 640; }
 
       function onMapInteractionStart() {
         if (!isMobile() || !panelVisible || panelHiddenByMap) return;
@@ -848,6 +860,8 @@
     // =======================================================================
     // Drawing Tool
     // =======================================================================
+    let panelWasOpenBeforeDrawing = false;
+
     function setDrawAreaToggleUi(drawingOn) {
       const btn = document.getElementById('btn-draw');
       const label = document.getElementById('btn-draw-label');
@@ -855,6 +869,26 @@
       if (label) label.textContent = drawingOn ? 'Cancel drawing' : 'Draw area';
       btn.setAttribute('aria-pressed', drawingOn ? 'true' : 'false');
       btn.classList.toggle('pulse-active', !!drawingOn);
+
+      // Mobile: show floating overlay while drawing, hide panel
+      if (isMobile()) {
+        const overlay = document.getElementById('drawing-overlay');
+        const panel   = document.getElementById('controls');
+        if (drawingOn) {
+          panelWasOpenBeforeDrawing = panelVisible;
+          overlay.classList.remove('hidden');
+          // close panel so the full map is available for drawing
+          if (panelVisible) {
+            panel.classList.add('hidden');
+          }
+        } else {
+          overlay.classList.add('hidden');
+          // restore panel only if it was open before drawing started
+          if (panelWasOpenBeforeDrawing) {
+            panel.classList.remove('hidden');
+          }
+        }
+      }
     }
 
     window.toggleDrawArea = function() {
