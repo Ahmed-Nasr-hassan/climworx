@@ -80,6 +80,8 @@
     .spinner { animation: spin 0.8s linear infinite; }
     /* Sparkline in tooltip */
     .sparkline { display: inline-block; vertical-align: middle; }
+    /* Parameter dropdown: dark background for the OS-rendered option list */
+    #param-select option { background: #1a1a2e; color: rgba(255,255,255,0.9); }
   </style>
 </head>
 
@@ -133,16 +135,18 @@
       </p>
     </div>
 
-    <!-- Parameter toggle -->
-    <div class="flex rounded-xl overflow-hidden border border-white/10">
-      <button id="btn-t2m" class="flex-1 py-2 text-sm font-medium transition-all bg-orange-500/20 text-orange-300 border-r border-white/10"
-              onclick="switchParam('t_2m')">
-        Temperature
-      </button>
-      <button id="btn-precip" class="flex-1 py-2 text-sm font-medium transition-all text-white/40"
-              onclick="switchParam('tot_prec')">
-        Precipitation
-      </button>
+    <!-- Parameter selector -->
+    <div class="relative">
+      <select id="param-select"
+              onchange="switchParam(this.value)"
+              class="w-full appearance-none rounded-xl border border-white/10 bg-white/5 px-3 py-2 pr-8 text-sm font-medium text-white/90 cursor-pointer focus:outline-none focus:ring-1 focus:ring-white/20 transition-all">
+      </select>
+      <!-- chevron -->
+      <div class="pointer-events-none absolute inset-y-0 right-2.5 flex items-center">
+        <svg class="w-4 h-4 text-white/40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+        </svg>
+      </div>
     </div>
 
     <!-- Draw area (toggle: click again to cancel) -->
@@ -350,6 +354,13 @@
     let basemapDrawPollId = null;
     /** True after first style `load`; prevents basemap switch racing initial load / double Draw. */
     let mapInitialLoadDone = false;
+    // ── Parameter registry ────────────────────────────────────────────────────
+    // To add a new parameter: push an entry here. The dropdown is built from this.
+    const PARAMS_CONFIG = [
+      { key: 't_2m',     label: 'Temperature',   accent: 'text-orange-300' },
+      { key: 'tot_prec', label: 'Precipitation',  accent: 'text-blue-300'  },
+    ];
+
     let currentParam = 't_2m';
     let spatialIndex = null;      // from spatial_index.json
     let stepsArray = null;        // actual forecast hour values [0,1,...,78,81,84,...,120]
@@ -795,7 +806,19 @@
       }, 100);
     };
 
+    function initParamSelect() {
+      const sel = document.getElementById('param-select');
+      PARAMS_CONFIG.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.key;
+        opt.textContent = p.label;
+        sel.appendChild(opt);
+      });
+      sel.value = currentParam;
+    }
+
     function initMap() {
+      initParamSelect();
       map = new maplibregl.Map({
         container: 'map',
         style: BASEMAP_IMAGERY_STYLE,
@@ -874,7 +897,14 @@
         const iconDown = document.getElementById('icon-chevron-down');
         const iconUp   = document.getElementById('icon-chevron-up');
 
-        let offsetY     = 0;
+        // Compute 1cm in device pixels for the initial lift on mobile
+        const _tmp = document.createElement('div');
+        _tmp.style.cssText = 'position:absolute;height:1cm;visibility:hidden';
+        document.body.appendChild(_tmp);
+        const INITIAL_BOTTOM = isMobile() ? _tmp.offsetHeight : 0;
+        document.body.removeChild(_tmp);
+
+        let offsetY     = INITIAL_BOTTOM;
         let minimized   = false;
         let dragActive  = false;
         let startY      = 0;
@@ -886,6 +916,7 @@
           offsetY = Math.max(0, Math.min(MAX_LIFT, px));
           panel.style.bottom = offsetY + 'px';
         }
+        applyOffset(INITIAL_BOTTOM);
 
         function toggleMinimize() {
           minimized = !minimized;
@@ -1437,10 +1468,9 @@
     window.switchParam = function(param) {
       currentParam = param;
 
-      // Update toggle styles
-      const isTemp = param === 't_2m';
-      document.getElementById('btn-t2m').className = `flex-1 py-2 text-sm font-medium transition-all border-r border-white/10 ${isTemp ? 'bg-orange-500/20 text-orange-300' : 'text-white/40'}`;
-      document.getElementById('btn-precip').className = `flex-1 py-2 text-sm font-medium transition-all ${!isTemp ? 'bg-blue-500/20 text-blue-300' : 'text-white/40'}`;
+      // Sync dropdown (handles calls from outside the select's onchange)
+      const sel = document.getElementById('param-select');
+      if (sel && sel.value !== param) sel.value = param;
 
       // If we have bounds, re-fetch with new param
       if (sliceBounds) {
