@@ -859,13 +859,29 @@
       mapContainer.addEventListener('mouseleave', () => {
         document.getElementById('tooltip').classList.add('hidden');
       });
+      let _touchHoldTimer = null;
+      mapContainer.addEventListener('touchstart', (e) => {
+        if (e.touches.length !== 1) return;
+        const t = e.touches[0];
+        const cx = t.clientX, cy = t.clientY;
+        _touchHoldTimer = setTimeout(() => {
+          _touchHoldTimer = null;
+          onCanvasHover({ clientX: cx, clientY: cy });
+        }, 400);
+      }, { passive: true });
       mapContainer.addEventListener('touchmove', (e) => {
+        // Cancel hold if finger moved significantly (user is panning)
+        if (_touchHoldTimer) {
+          clearTimeout(_touchHoldTimer);
+          _touchHoldTimer = null;
+        }
         if (e.touches.length === 1) {
           const t = e.touches[0];
           onCanvasHover({ clientX: t.clientX, clientY: t.clientY });
         }
       }, { passive: true });
       mapContainer.addEventListener('touchend', () => {
+        if (_touchHoldTimer) { clearTimeout(_touchHoldTimer); _touchHoldTimer = null; }
         document.getElementById('tooltip').classList.add('hidden');
       });
 
@@ -1560,10 +1576,21 @@
 
       // Position tooltip
       tooltip.classList.remove('hidden');
-      const tx = e.clientX + 16;
-      const ty = e.clientY - 10;
-      tooltip.style.left = `${Math.min(tx, window.innerWidth - 200)}px`;
-      tooltip.style.top = `${Math.min(ty, window.innerHeight - 100)}px`;
+      if (isMobile()) {
+        // Measure after un-hiding so we know the real height
+        const ttW = tooltip.offsetWidth;
+        const ttH = tooltip.offsetHeight;
+        const FINGER_GAP = 16; // px clearance above fingertip
+        const tx = Math.max(8, Math.min(e.clientX - ttW / 2, window.innerWidth - ttW - 8));
+        const ty = Math.max(8, e.clientY - ttH - FINGER_GAP);
+        tooltip.style.left = `${tx}px`;
+        tooltip.style.top  = `${ty}px`;
+      } else {
+        const tx = e.clientX + 16;
+        const ty = e.clientY - 10;
+        tooltip.style.left = `${Math.min(tx, window.innerWidth - 200)}px`;
+        tooltip.style.top  = `${Math.min(ty, window.innerHeight - 100)}px`;
+      }
     }
 
     // =======================================================================
