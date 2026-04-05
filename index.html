@@ -229,33 +229,50 @@
     <div id="legend-min" class="text-[10px] text-white/60 text-center mt-auto font-mono"></div>
   </div>
 
-  <!-- ====== Playback Bar (bottom) ====== -->
-  <div id="playback" class="glass absolute bottom-0 left-0 right-0 z-30 px-3 py-2 sm:px-6 sm:py-3 hidden"
-       style="border-radius: 1rem 1rem 0 0; padding-bottom: max(0.5rem, env(safe-area-inset-bottom));">
-    <!-- Mobile: stack vertically; Desktop: single row -->
-    <div class="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 w-full min-w-0">
-      <!-- Top row on mobile: play + slider + speed -->
-      <div class="flex items-center gap-2 sm:gap-3 w-full min-w-0">
-        <!-- Play/Pause -->
-        <button type="button" id="btn-play" onclick="togglePlay()" class="shrink-0 w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-all">
-          <svg id="icon-play" class="w-4 h-4 sm:w-5 sm:h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-          <svg id="icon-pause" class="w-4 h-4 sm:w-5 sm:h-5 hidden" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-        </button>
-        <!-- Timeline -->
-        <div class="flex-1 min-w-0">
-          <input id="timeline" type="range" min="0" max="92" value="0" step="1" class="w-full cursor-pointer" oninput="seekTo(this.value)" />
+  <!-- ====== Playback Bar (bottom, draggable) ====== -->
+  <div id="playback" class="glass absolute bottom-0 left-0 right-0 z-30 hidden"
+       style="border-radius: 1rem 1rem 0 0; touch-action: none; user-select: none;">
+    <!-- Drag handle — drag pill to reposition, chevron button to minimize -->
+    <div id="playback-handle" class="flex items-center justify-center pt-2 pb-1 cursor-grab active:cursor-grabbing relative">
+      <div class="w-10 h-1 rounded-full bg-white/30"></div>
+      <button id="btn-minimize-playback" type="button"
+              class="absolute right-3 top-1 w-8 h-6 flex items-center justify-center text-white/40 hover:text-white/80 transition-colors"
+              style="touch-action: none;">
+        <svg id="icon-chevron-down" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+        </svg>
+        <svg id="icon-chevron-up" class="w-4 h-4 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/>
+        </svg>
+      </button>
+    </div>
+    <!-- Collapsible content -->
+    <div id="playback-body" class="px-3 pb-2 pr-12 sm:px-6 sm:pr-6 sm:pb-3">
+      <!-- Mobile: stack vertically; Desktop: single row -->
+      <div class="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 w-full min-w-0">
+        <!-- Top row on mobile: play + slider + speed -->
+        <div class="flex items-center gap-2 sm:gap-3 w-full min-w-0">
+          <!-- Play/Pause -->
+          <button type="button" id="btn-play" onclick="togglePlay()" class="shrink-0 w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-all">
+            <svg id="icon-play" class="w-4 h-4 sm:w-5 sm:h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            <svg id="icon-pause" class="w-4 h-4 sm:w-5 sm:h-5 hidden" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+          </button>
+          <!-- Timeline -->
+          <div class="flex-1 min-w-0">
+            <input id="timeline" type="range" min="0" max="92" value="0" step="1" class="w-full cursor-pointer" oninput="seekTo(this.value)" />
+          </div>
+          <!-- Speed -->
+          <select id="speed-select" onchange="setSpeed(this.value)"
+                  class="shrink-0 bg-white/10 border border-white/10 rounded-lg text-[11px] sm:text-xs px-1.5 py-1.5 text-white/80 cursor-pointer w-14 sm:w-16 text-center">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+          </select>
         </div>
-        <!-- Speed -->
-        <select id="speed-select" onchange="setSpeed(this.value)"
-                class="shrink-0 bg-white/10 border border-white/10 rounded-lg text-[11px] sm:text-xs px-1.5 py-1.5 text-white/80 cursor-pointer w-14 sm:w-16 text-center">
-          <option value="0.5">0.5×</option>
-          <option value="1" selected>1×</option>
-          <option value="2">2×</option>
-          <option value="4">4×</option>
-        </select>
+        <!-- Step label (below on mobile, inline on desktop) -->
+        <div id="step-label" class="text-[10px] sm:text-xs text-white/60 font-mono leading-snug text-center sm:text-right sm:whitespace-nowrap sm:w-56 sm:shrink-0 truncate"></div>
       </div>
-      <!-- Step label (below on mobile, inline on desktop) -->
-      <div id="step-label" class="text-[10px] sm:text-xs text-white/60 font-mono leading-snug text-center sm:text-right sm:whitespace-nowrap sm:w-56 sm:shrink-0 truncate"></div>
     </div>
   </div>
 
@@ -847,6 +864,60 @@
 
       map.on('movestart', onMapInteractionStart);
       map.on('moveend',   onMapInteractionEnd);
+
+      // ── Playback panel: drag-to-reposition + chevron to minimize ─────────
+      (function () {
+        const panel    = document.getElementById('playback');
+        const handle   = document.getElementById('playback-handle');
+        const body     = document.getElementById('playback-body');
+        const btnMin   = document.getElementById('btn-minimize-playback');
+        const iconDown = document.getElementById('icon-chevron-down');
+        const iconUp   = document.getElementById('icon-chevron-up');
+
+        let offsetY     = 0;
+        let minimized   = false;
+        let dragActive  = false;
+        let startY      = 0;
+        let startOffset = 0;
+        const MAX_LIFT  = 220;
+        const DRAG_THRESHOLD = 12;   // px — keeps taps from accidentally dragging
+
+        function applyOffset(px) {
+          offsetY = Math.max(0, Math.min(MAX_LIFT, px));
+          panel.style.bottom = offsetY + 'px';
+        }
+
+        function toggleMinimize() {
+          minimized = !minimized;
+          body.style.display = minimized ? 'none' : '';
+          iconDown.classList.toggle('hidden', minimized);
+          iconUp.classList.toggle('hidden', !minimized);
+        }
+
+        btnMin.addEventListener('click', (e) => {
+          e.stopPropagation();
+          toggleMinimize();
+        });
+
+        // Drag on the handle bar (not the button)
+        handle.addEventListener('pointerdown', (e) => {
+          if (e.target === btnMin || btnMin.contains(e.target)) return;
+          dragActive  = false;
+          startY      = e.clientY;
+          startOffset = offsetY;
+          handle.setPointerCapture(e.pointerId);
+          e.preventDefault();
+        });
+
+        handle.addEventListener('pointermove', (e) => {
+          if (!handle.hasPointerCapture(e.pointerId)) return;
+          const dy = startY - e.clientY;
+          if (!dragActive && Math.abs(dy) > DRAG_THRESHOLD) dragActive = true;
+          if (dragActive) applyOffset(startOffset + dy);
+        });
+
+        handle.addEventListener('pointerup', () => { dragActive = false; });
+      }());
 
       updateBasemapToggleUI();
     }
