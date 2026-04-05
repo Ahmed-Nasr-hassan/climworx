@@ -514,6 +514,12 @@ def upload_to_staging(
         f.write(datetime.now(timezone.utc).isoformat())
     log.info("_SUCCESS marker written: %s", marker_key)
 
+    # Write the resolved run_dt so the promote job uses the same run, not the
+    # raw CI run_dt (which may differ if DWD fallback was triggered).
+    resolved_key = f"{BUCKET}/staging/{run_dt}/_RESOLVED_RUN"
+    with fs.open(resolved_key, "w") as f:
+        f.write(run_dt)
+
     return staging_path
 
 
@@ -537,9 +543,18 @@ def validate_run(
 
     for param in params:
         staging_path = f"{BUCKET}/staging/{run_dt}/{param}"
+
+        # 1. _SUCCESS marker — fail fast if staging upload was interrupted
+        marker = f"{staging_path}/_SUCCESS"
+        if not fs.exists(marker):
+            raise ValueError(
+                f"[{param}] _SUCCESS marker missing at {marker} — "
+                "staging upload likely incomplete or ETL job failed"
+            )
+
         store = s3fs.S3Map(root=staging_path, s3=fs, check=False)
 
-        # 1. Zarr metadata readable
+        # 2. Zarr store readable (consolidated metadata)
         try:
             ds = xr.open_zarr(store, consolidated=True)
         except Exception as exc:
@@ -600,11 +615,6 @@ def validate_run(
                 raise ValueError(
                     f"[{param}] Expected {ENSEMBLE_MEMBERS} ensemble members, got {n_members}"
                 )
-
-        # 5. _SUCCESS marker exists
-        marker = f"{staging_path}/_SUCCESS"
-        if not fs.exists(marker):
-            raise ValueError(f"[{param}] _SUCCESS marker missing at {marker}")
 
         log.info(
             "  [OK] %s — %d/%d steps in Zarr, %d data vars%s",
@@ -856,6 +866,21 @@ def main() -> None:
     # ------------------------------------------------------------------
     if args.validate_only:
         all_params = args.params or list(PARAM_BOUNDS.keys())
+
+        # The ETL staging jobs may have fallen back to an older DWD run.
+        # Read the resolved run_dt they actually staged under, so validation
+        # and promotion use the correct path.
+        resolved_key = f"{BUCKET}/staging/{run_dt}/_RESOLVED_RUN"
+        if fs.exists(resolved_key):
+            with fs.open(resolved_key) as f:
+                resolved = f.read().decode().strip()
+            if resolved != run_dt:
+                log.info("Promote: resolved run_dt %s → %s (from staging/_RESOLVED_RUN)", run_dt, resolved)
+                run_dt = resolved
+                all_steps = get_all_steps(run_dt[8:10])
+        else:
+            log.warning("No _RESOLVED_RUN marker found; using CI run_dt %s", run_dt)
+
         try:
             with_retry(
                 validate_run,
