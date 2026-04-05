@@ -397,7 +397,7 @@ async function handleZarrProxy(
     return new Response(obj.body, {
       headers: {
         "Content-Type": "application/json",
-        "Cache-Control": "no-store",
+        "Cache-Control": "public, max-age=60",
         ...CORS_HEADERS,
       },
     });
@@ -422,9 +422,10 @@ async function handleZarrProxy(
 
   const isMetadata = /\.(zarray|zattrs|zmetadata|zgroup)$/.test(objPath);
   const contentType = isMetadata ? "application/json" : "application/octet-stream";
-  // Metadata files must not be cached by CDN: the proxy URL has no run-version,
-  // so a stale .zarray would cause the dashboard to read the wrong step count.
-  const cacheControl = isMetadata ? "no-store" : "public, max-age=3600";
+  // Metadata (e.g. .zarray) uses a short TTL: the proxy URL has no run-version so
+  // a long cache would serve a stale shape after a run change. 60s is well under
+  // the 6-hour run interval while still benefiting from CDN for concurrent users.
+  const cacheControl = isMetadata ? "public, max-age=60" : "public, max-age=3600";
 
   return new Response(obj.body, {
     headers: {
