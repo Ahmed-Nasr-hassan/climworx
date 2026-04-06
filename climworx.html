@@ -1,0 +1,1076 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClimWorx — ICON Forecast Explorer</title>
+
+<!-- Leaflet -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+
+<!-- Fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<style>
+  :root {
+    --bg-primary: #0a0e17;
+    --bg-secondary: #111827;
+    --bg-card: #1a2236;
+    --bg-card-hover: #1e2a42;
+    --border: #2a3a5c;
+    --text-primary: #e2e8f0;
+    --text-secondary: #8896b3;
+    --text-muted: #5a6a8a;
+    --accent-blue: #3b82f6;
+    --accent-cyan: #06b6d4;
+    --accent-teal: #14b8a6;
+    --accent-orange: #f59e0b;
+    --accent-red: #ef4444;
+    --accent-green: #22c55e;
+    --gradient-hero: linear-gradient(135deg, #0c1220 0%, #162034 40%, #0f1a2e 100%);
+    --shadow-card: 0 4px 24px rgba(0,0,0,0.4);
+    --shadow-glow: 0 0 30px rgba(59,130,246,0.15);
+    --radius: 12px;
+    --radius-sm: 8px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── Header ── */
+  .header {
+    background: var(--gradient-hero);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 28px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: relative;
+    z-index: 1000;
+  }
+  .header::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent-cyan), var(--accent-blue), transparent);
+    opacity: 0.5;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .logo-icon {
+    width: 36px;
+    height: 36px;
+    background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    font-weight: 700;
+    color: white;
+    box-shadow: 0 0 20px rgba(6,182,212,0.3);
+  }
+  .logo-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700;
+    font-size: 20px;
+    letter-spacing: -0.5px;
+    background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .header-info {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+  .model-badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 6px 14px;
+    background: rgba(59,130,246,0.12);
+    border: 1px solid rgba(59,130,246,0.25);
+    border-radius: 20px;
+    color: var(--accent-blue);
+    letter-spacing: 0.5px;
+  }
+  .run-time {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* ── Layout ── */
+  .app-container {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    height: calc(100vh - 65px);
+  }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border);
+    padding: 20px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .sidebar::-webkit-scrollbar { width: 6px; }
+  .sidebar::-webkit-scrollbar-track { background: transparent; }
+  .sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .section-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    transition: all 0.2s ease;
+  }
+  .card:hover { border-color: rgba(59,130,246,0.3); }
+
+  .instructions {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+  }
+  .instructions strong { color: var(--accent-cyan); font-weight: 600; }
+
+  /* ── Controls ── */
+  .control-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .control-group label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+  .control-group select, .control-group input {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    color: var(--text-primary);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.2s;
+    width: 100%;
+  }
+  .control-group select:focus, .control-group input:focus {
+    border-color: var(--accent-blue);
+    box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
+  }
+  .control-group select option { background: var(--bg-primary); }
+
+  .btn {
+    padding: 11px 20px;
+    border-radius: var(--radius-sm);
+    border: none;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+    color: white;
+    box-shadow: 0 4px 16px rgba(59,130,246,0.25);
+  }
+  .btn-primary:hover {
+    box-shadow: 0 4px 24px rgba(59,130,246,0.4);
+    transform: translateY(-1px);
+  }
+  .btn-primary:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+  }
+  .btn-secondary {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+  }
+  .btn-secondary:hover {
+    border-color: var(--accent-blue);
+    color: var(--text-primary);
+  }
+
+  .grid-info {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    padding: 10px;
+    background: rgba(0,0,0,0.2);
+    border-radius: var(--radius-sm);
+    line-height: 1.7;
+  }
+  .grid-info .val { color: var(--accent-cyan); font-weight: 600; }
+
+  /* ── Status ── */
+  .status-bar {
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.3s;
+  }
+  .status-idle { background: rgba(59,130,246,0.08); color: var(--accent-blue); border: 1px solid rgba(59,130,246,0.15); }
+  .status-loading { background: rgba(245,158,11,0.08); color: var(--accent-orange); border: 1px solid rgba(245,158,11,0.15); }
+  .status-success { background: rgba(34,197,94,0.08); color: var(--accent-green); border: 1px solid rgba(34,197,94,0.15); }
+  .status-error { background: rgba(239,68,68,0.08); color: var(--accent-red); border: 1px solid rgba(239,68,68,0.15); }
+
+  .spinner {
+    width: 14px; height: 14px;
+    border: 2px solid transparent;
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .progress-bar {
+    width: 100%;
+    height: 4px;
+    background: rgba(0,0,0,0.3);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 6px;
+  }
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-cyan), var(--accent-blue));
+    border-radius: 2px;
+    transition: width 0.3s ease;
+    width: 0%;
+  }
+
+  /* ── Main Panel ── */
+  .main-panel {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Tabs ── */
+  .tab-bar {
+    display: flex;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 0 16px;
+  }
+  .tab-btn {
+    padding: 12px 20px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    background: none;
+    border: none;
+    cursor: pointer;
+    position: relative;
+    transition: color 0.2s;
+  }
+  .tab-btn:hover { color: var(--text-secondary); }
+  .tab-btn.active { color: var(--accent-cyan); }
+  .tab-btn.active::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 8px;
+    right: 8px;
+    height: 2px;
+    background: var(--accent-cyan);
+    border-radius: 2px 2px 0 0;
+  }
+
+  .tab-content {
+    flex: 1;
+    display: none;
+    overflow: hidden;
+  }
+  .tab-content.active { display: flex; flex-direction: column; }
+
+  #map {
+    flex: 1;
+    min-height: 400px;
+    background: var(--bg-primary);
+  }
+
+  .chart-container {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .chart-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    box-shadow: var(--shadow-card);
+  }
+  .chart-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chart-title .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent-cyan);
+  }
+
+  .empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    gap: 12px;
+    padding: 40px;
+    text-align: center;
+  }
+  .empty-state svg { opacity: 0.3; }
+  .empty-state p { font-size: 14px; max-width: 300px; line-height: 1.6; }
+
+  /* ── Responsive ── */
+  @media (max-width: 900px) {
+    .app-container {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto 1fr;
+    }
+    .sidebar {
+      max-height: 300px;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+  }
+
+  /* ── Leaflet overrides ── */
+  .leaflet-container { background: #0a0e17 !important; }
+  .leaflet-control-zoom a {
+    background: var(--bg-card) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border) !important;
+  }
+  .leaflet-bar { border: 1px solid var(--border) !important; border-radius: 8px !important; overflow: hidden; }
+  .leaflet-draw-toolbar a { background-color: var(--bg-card) !important; border-color: var(--border) !important; }
+
+  /* ── Animation ── */
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .fade-in { animation: fadeIn 0.4s ease forwards; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="logo">
+    <div class="logo-icon">⛈</div>
+    <span class="logo-text">ClimWorx</span>
+  </div>
+  <div class="header-info">
+    <span class="model-badge">DWD ICON GLOBAL · 13 km</span>
+    <span class="run-time" id="runTime">—</span>
+  </div>
+</div>
+
+<!-- App -->
+<div class="app-container">
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div>
+      <div class="section-label">How to Use</div>
+      <div class="card">
+        <p class="instructions">
+          <strong>1.</strong> Draw a polygon on the map using the draw tool (left side of map).<br>
+          <strong>2.</strong> Choose your weather variable and grid resolution.<br>
+          <strong>3.</strong> Click <strong>Fetch Forecast</strong> to retrieve ICON model data.<br>
+          <strong>4.</strong> Explore results in the <strong>Plots</strong> and <strong>Contour</strong> tabs.
+        </p>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label">Configuration</div>
+      <div class="card">
+        <div class="control-group" style="margin-bottom:12px">
+          <label>Weather Variable</label>
+          <select id="variableSelect">
+            <option value="precipitation">Precipitation (mm/h)</option>
+            <option value="temperature_2m">Temperature 2m (°C)</option>
+            <option value="relative_humidity_2m">Relative Humidity 2m (%)</option>
+            <option value="wind_speed_10m">Wind Speed 10m (km/h)</option>
+            <option value="cloud_cover">Cloud Cover (%)</option>
+            <option value="surface_pressure">Surface Pressure (hPa)</option>
+            <option value="soil_moisture_0_to_7cm">Soil Moisture 0–7cm (m³/m³)</option>
+            <option value="et0_fao_evapotranspiration">ET₀ FAO Evapotranspiration (mm)</option>
+          </select>
+        </div>
+
+        <div class="control-group" style="margin-bottom:12px">
+          <label>Grid Resolution (°)</label>
+          <select id="resolutionSelect">
+            <option value="0.25">0.25° (~28 km)</option>
+            <option value="0.15" selected>0.15° (~17 km)</option>
+            <option value="0.1">0.10° (~11 km) — Finer</option>
+          </select>
+        </div>
+
+        <div class="control-group" style="margin-bottom:12px">
+          <label>Forecast Days</label>
+          <select id="forecastDays">
+            <option value="3">3 days</option>
+            <option value="5" selected>5 days</option>
+            <option value="7">7 days</option>
+          </select>
+        </div>
+
+        <div class="control-group" style="margin-bottom:14px">
+          <label>Contour Timestep</label>
+          <select id="contourTimestep">
+            <option value="0">Loading...</option>
+          </select>
+        </div>
+
+        <button class="btn btn-primary" id="fetchBtn" disabled onclick="fetchData()">
+          Fetch Forecast
+        </button>
+        <button class="btn btn-secondary" style="margin-top:8px" onclick="clearAll()">
+          Clear Polygon
+        </button>
+      </div>
+    </div>
+
+    <div id="gridInfoBox" style="display:none">
+      <div class="section-label">Grid Info</div>
+      <div class="grid-info" id="gridInfo"></div>
+    </div>
+
+    <div>
+      <div class="section-label">Status</div>
+      <div class="status-bar status-idle" id="statusBar">
+        Draw a polygon on the map to begin
+      </div>
+      <div class="progress-bar" id="progressBarWrap" style="display:none">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Panel -->
+  <div class="main-panel">
+    <div class="tab-bar">
+      <button class="tab-btn active" data-tab="map" onclick="switchTab('map')">🗺 Map</button>
+      <button class="tab-btn" data-tab="plots" onclick="switchTab('plots')">📊 Time Series</button>
+      <button class="tab-btn" data-tab="contour" onclick="switchTab('contour')">🌡 Contour Map</button>
+    </div>
+
+    <div class="tab-content active" id="tab-map">
+      <div id="map"></div>
+    </div>
+
+    <div class="tab-content" id="tab-plots">
+      <div class="chart-container" id="plotsContainer">
+        <div class="empty-state">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-6"/></svg>
+          <p>Draw a polygon on the map and fetch forecast data to see time-series plots here.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-content" id="tab-contour">
+      <div class="chart-container" id="contourContainer">
+        <div class="empty-state">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 3c-2 3-3 6-3 9s1 6 3 9"/><path d="M12 3c2 3 3 6 3 9s-1 6-3 9"/><path d="M3 12h18"/></svg>
+          <p>Spatial contour maps will appear here after fetching data. Use the timestep selector in the sidebar.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Scripts -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.27.1/plotly.min.js"></script>
+
+<script>
+// ══════════════════════════════════════
+//  STATE
+// ══════════════════════════════════════
+let map, drawnItems, drawnPolygon = null;
+let fetchedData = null; // { gridPoints, times, values2D, variable, unit }
+
+// ══════════════════════════════════════
+//  INIT MAP
+// ══════════════════════════════════════
+function initMap() {
+  map = L.map('map', {
+    center: [30.0, 31.2], // Cairo default
+    zoom: 7,
+    zoomControl: true
+  });
+
+  // Dark basemap
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; <a href="https://carto.com/">CARTO</a> | &copy; <a href="https://www.openstreetmap.org/">OSM</a>',
+    subdomains: 'abcd',
+    maxZoom: 19
+  }).addTo(map);
+
+  // Draw control
+  drawnItems = new L.FeatureGroup();
+  map.addLayer(drawnItems);
+
+  const drawControl = new L.Control.Draw({
+    draw: {
+      polygon: {
+        allowIntersection: false,
+        shapeOptions: { color: '#06b6d4', weight: 2, fillOpacity: 0.1, fillColor: '#06b6d4' }
+      },
+      polyline: false, rectangle: true, circle: false, circlemarker: false, marker: false
+    },
+    edit: { featureGroup: drawnItems }
+  });
+  map.addControl(drawControl);
+
+  map.on(L.Draw.Event.CREATED, function (e) {
+    drawnItems.clearLayers();
+    drawnItems.addLayer(e.layer);
+    drawnPolygon = e.layer;
+    document.getElementById('fetchBtn').disabled = false;
+    setStatus('idle', 'Polygon drawn — ready to fetch data');
+    updateGridInfo();
+  });
+
+  map.on(L.Draw.Event.DELETED, function () {
+    drawnPolygon = null;
+    document.getElementById('fetchBtn').disabled = true;
+    setStatus('idle', 'Draw a polygon on the map to begin');
+    document.getElementById('gridInfoBox').style.display = 'none';
+  });
+
+  updateRunTime();
+  setInterval(updateRunTime, 60000);
+}
+
+// ══════════════════════════════════════
+//  HELPERS
+// ══════════════════════════════════════
+function updateRunTime() {
+  const now = new Date();
+  const utcH = now.getUTCHours();
+  // Latest available ICON run (usually ~4-5h delay)
+  let run;
+  if (utcH >= 17) run = 12;
+  else if (utcH >= 11) run = 6;
+  else if (utcH >= 5) run = 0;
+  else run = 18; // previous day
+  const d = run > utcH ? new Date(now - 86400000) : now;
+  const ds = d.toISOString().slice(0, 10);
+  document.getElementById('runTime').textContent = `Latest run: ${ds} ${String(run).padStart(2,'0')}Z`;
+}
+
+function setStatus(type, msg) {
+  const bar = document.getElementById('statusBar');
+  bar.className = `status-bar status-${type}`;
+  bar.innerHTML = (type === 'loading' ? '<div class="spinner"></div>' : '') + msg;
+}
+
+function setProgress(pct) {
+  const wrap = document.getElementById('progressBarWrap');
+  const fill = document.getElementById('progressFill');
+  wrap.style.display = pct >= 0 ? 'block' : 'none';
+  fill.style.width = Math.min(100, pct) + '%';
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `tab-${name}`));
+  if (name === 'map') setTimeout(() => map.invalidateSize(), 100);
+}
+
+function clearAll() {
+  drawnItems.clearLayers();
+  drawnPolygon = null;
+  fetchedData = null;
+  document.getElementById('fetchBtn').disabled = true;
+  document.getElementById('gridInfoBox').style.display = 'none';
+  setStatus('idle', 'Draw a polygon on the map to begin');
+  document.getElementById('plotsContainer').innerHTML = `
+    <div class="empty-state">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-6"/></svg>
+      <p>Draw a polygon on the map and fetch forecast data to see time-series plots here.</p>
+    </div>`;
+  document.getElementById('contourContainer').innerHTML = `
+    <div class="empty-state">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 3c-2 3-3 6-3 9s1 6 3 9"/><path d="M12 3c2 3 3 6 3 9s-1 6-3 9"/><path d="M3 12h18"/></svg>
+      <p>Spatial contour maps will appear here after fetching data.</p>
+    </div>`;
+}
+
+// ══════════════════════════════════════
+//  GRID GENERATION
+// ══════════════════════════════════════
+function getPolygonCoords() {
+  if (!drawnPolygon) return null;
+  const latlngs = drawnPolygon.getLatLngs ? drawnPolygon.getLatLngs()[0] : drawnPolygon.getLatLngs();
+  return latlngs.map(ll => [ll.lat, ll.lng]);
+}
+
+function getBBox(coords) {
+  let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
+  coords.forEach(([lat, lng]) => {
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+  });
+  return { minLat, maxLat, minLng, maxLng };
+}
+
+// Ray-casting point-in-polygon
+function pointInPolygon(lat, lng, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [yi, xi] = polygon[i], [yj, xj] = polygon[j];
+    if ((yi > lat) !== (yj > lat) && lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function generateGridPoints(polygonCoords, resolution) {
+  const bbox = getBBox(polygonCoords);
+  const points = [];
+  for (let lat = bbox.minLat; lat <= bbox.maxLat; lat += resolution) {
+    for (let lng = bbox.minLng; lng <= bbox.maxLng; lng += resolution) {
+      if (pointInPolygon(lat, lng, polygonCoords)) {
+        points.push({ lat: Math.round(lat * 1e5) / 1e5, lng: Math.round(lng * 1e5) / 1e5 });
+      }
+    }
+  }
+  return points;
+}
+
+function updateGridInfo() {
+  const coords = getPolygonCoords();
+  if (!coords) return;
+  const res = parseFloat(document.getElementById('resolutionSelect').value);
+  const pts = generateGridPoints(coords, res);
+  const box = document.getElementById('gridInfoBox');
+  box.style.display = 'block';
+  document.getElementById('gridInfo').innerHTML =
+    `Grid points: <span class="val">${pts.length}</span><br>` +
+    `Resolution: <span class="val">${res}°</span><br>` +
+    `API calls: <span class="val">${Math.ceil(pts.length / 50)}</span> batch(es)<br>` +
+    `Polygon vertices: <span class="val">${coords.length}</span>`;
+}
+
+// ══════════════════════════════════════
+//  FETCH DATA
+// ══════════════════════════════════════
+async function fetchData() {
+  const coords = getPolygonCoords();
+  if (!coords) return;
+
+  const variable = document.getElementById('variableSelect').value;
+  const resolution = parseFloat(document.getElementById('resolutionSelect').value);
+  const forecastDays = parseInt(document.getElementById('forecastDays').value);
+  const gridPoints = generateGridPoints(coords, resolution);
+
+  if (gridPoints.length === 0) {
+    setStatus('error', 'No grid points inside polygon — try a larger area or finer resolution');
+    return;
+  }
+  if (gridPoints.length > 500) {
+    setStatus('error', `Too many grid points (${gridPoints.length}). Use coarser resolution or smaller polygon.`);
+    return;
+  }
+
+  document.getElementById('fetchBtn').disabled = true;
+  setStatus('loading', `Fetching ${gridPoints.length} grid points...`);
+  setProgress(0);
+
+  try {
+    // Open-Meteo supports up to ~50 locations per call
+    const batchSize = 50;
+    const batches = [];
+    for (let i = 0; i < gridPoints.length; i += batchSize) {
+      batches.push(gridPoints.slice(i, i + batchSize));
+    }
+
+    let allTimes = null;
+    const allValues = []; // allValues[pointIndex] = [values per hour]
+    const allLats = [];
+    const allLngs = [];
+
+    for (let b = 0; b < batches.length; b++) {
+      const batch = batches[b];
+      const lats = batch.map(p => p.lat).join(',');
+      const lngs = batch.map(p => p.lng).join(',');
+
+      const url = `https://api.open-meteo.com/v1/dwd-icon?latitude=${lats}&longitude=${lngs}&hourly=${variable}&forecast_days=${forecastDays}&timezone=UTC`;
+
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+      const data = await resp.json();
+
+      // Handle single vs multi-location response
+      if (batch.length === 1) {
+        if (!allTimes) allTimes = data.hourly.time;
+        allValues.push(data.hourly[variable]);
+        allLats.push(data.latitude);
+        allLngs.push(data.longitude);
+      } else {
+        // Multi-location response is an array
+        const items = Array.isArray(data) ? data : [data];
+        for (const item of items) {
+          if (!allTimes) allTimes = item.hourly.time;
+          allValues.push(item.hourly[variable]);
+          allLats.push(item.latitude);
+          allLngs.push(item.longitude);
+        }
+      }
+
+      setProgress(((b + 1) / batches.length) * 100);
+      setStatus('loading', `Fetched batch ${b + 1}/${batches.length}...`);
+
+      // Small delay to be nice to the API
+      if (b < batches.length - 1) await new Promise(r => setTimeout(r, 300));
+    }
+
+    // Determine units
+    const unitMap = {
+      precipitation: 'mm', temperature_2m: '°C', relative_humidity_2m: '%',
+      wind_speed_10m: 'km/h', cloud_cover: '%', surface_pressure: 'hPa',
+      soil_moisture_0_to_7cm: 'm³/m³', et0_fao_evapotranspiration: 'mm'
+    };
+    const varLabels = {
+      precipitation: 'Precipitation', temperature_2m: 'Temperature (2m)',
+      relative_humidity_2m: 'Relative Humidity (2m)', wind_speed_10m: 'Wind Speed (10m)',
+      cloud_cover: 'Cloud Cover', surface_pressure: 'Surface Pressure',
+      soil_moisture_0_to_7cm: 'Soil Moisture (0–7cm)', et0_fao_evapotranspiration: 'ET₀ (FAO)'
+    };
+
+    fetchedData = {
+      gridPoints: gridPoints.map((p, i) => ({ lat: allLats[i] || p.lat, lng: allLngs[i] || p.lng })),
+      times: allTimes,
+      values2D: allValues, // [pointIndex][timeIndex]
+      variable,
+      unit: unitMap[variable] || '',
+      label: varLabels[variable] || variable
+    };
+
+    // Populate timestep selector
+    populateTimestepSelector(allTimes);
+
+    setProgress(-1);
+    setStatus('success', `✓ ${allLats.length} points × ${allTimes.length} hours loaded`);
+    document.getElementById('fetchBtn').disabled = false;
+
+    // Render
+    renderTimeSeries();
+    renderContour();
+    switchTab('plots');
+
+  } catch (err) {
+    console.error(err);
+    setProgress(-1);
+    setStatus('error', 'Error: ' + err.message);
+    document.getElementById('fetchBtn').disabled = false;
+  }
+}
+
+function populateTimestepSelector(times) {
+  const sel = document.getElementById('contourTimestep');
+  sel.innerHTML = '';
+  // Show every 3rd hour to keep it manageable
+  times.forEach((t, i) => {
+    if (i % 3 === 0 || i === times.length - 1) {
+      const opt = document.createElement('option');
+      opt.value = i;
+      const d = new Date(t);
+      opt.textContent = d.toUTCString().replace('GMT', 'UTC');
+      sel.appendChild(opt);
+    }
+  });
+  sel.onchange = () => renderContour();
+}
+
+// ══════════════════════════════════════
+//  RENDER TIME SERIES
+// ══════════════════════════════════════
+function renderTimeSeries() {
+  if (!fetchedData) return;
+  const { times, values2D, unit, label, gridPoints } = fetchedData;
+  const container = document.getElementById('plotsContainer');
+  container.innerHTML = '';
+
+  // 1) Area-average time series
+  const avgDiv = document.createElement('div');
+  avgDiv.className = 'chart-box fade-in';
+  avgDiv.innerHTML = `<div class="chart-title"><span class="dot"></span>Area-Average ${label}</div><div id="avgPlot"></div>`;
+  container.appendChild(avgDiv);
+
+  const nT = times.length;
+  const avgValues = [];
+  const minValues = [];
+  const maxValues = [];
+  for (let t = 0; t < nT; t++) {
+    let sum = 0, count = 0, mn = Infinity, mx = -Infinity;
+    for (let p = 0; p < values2D.length; p++) {
+      const v = values2D[p]?.[t];
+      if (v != null && !isNaN(v)) {
+        sum += v; count++;
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+      }
+    }
+    avgValues.push(count ? sum / count : null);
+    minValues.push(count ? mn : null);
+    maxValues.push(count ? mx : null);
+  }
+
+  const timesISO = times.map(t => new Date(t));
+
+  Plotly.newPlot('avgPlot', [
+    {
+      x: timesISO, y: maxValues, type: 'scatter', mode: 'lines',
+      line: { width: 0 }, showlegend: false, hoverinfo: 'skip'
+    },
+    {
+      x: timesISO, y: minValues, type: 'scatter', mode: 'lines',
+      line: { width: 0 }, fill: 'tonexty', fillcolor: 'rgba(6,182,212,0.12)',
+      showlegend: false, hoverinfo: 'skip'
+    },
+    {
+      x: timesISO, y: avgValues, type: 'scatter', mode: 'lines',
+      line: { color: '#06b6d4', width: 2.5 },
+      name: `Avg ${label}`,
+      hovertemplate: `%{x|%b %d %H:%M}<br>${label}: %{y:.2f} ${unit}<extra></extra>`
+    }
+  ], {
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    font: { family: 'DM Sans', color: '#8896b3', size: 11 },
+    margin: { l: 50, r: 20, t: 10, b: 40 },
+    xaxis: { gridcolor: 'rgba(42,58,92,0.5)', tickformat: '%b %d\n%H:%M' },
+    yaxis: { gridcolor: 'rgba(42,58,92,0.5)', title: unit },
+    hovermode: 'x unified',
+    height: 280,
+  }, { responsive: true, displayModeBar: false });
+
+  // 2) If precipitation, show cumulative
+  if (fetchedData.variable === 'precipitation') {
+    const cumDiv = document.createElement('div');
+    cumDiv.className = 'chart-box fade-in';
+    cumDiv.style.animationDelay = '0.1s';
+    cumDiv.innerHTML = `<div class="chart-title"><span class="dot" style="background:var(--accent-blue)"></span>Cumulative Area-Average Precipitation</div><div id="cumPlot"></div>`;
+    container.appendChild(cumDiv);
+
+    const cumValues = [];
+    let running = 0;
+    for (const v of avgValues) {
+      running += (v || 0);
+      cumValues.push(running);
+    }
+
+    Plotly.newPlot('cumPlot', [{
+      x: timesISO, y: cumValues, type: 'scatter', mode: 'lines',
+      fill: 'tozeroy', fillcolor: 'rgba(59,130,246,0.15)',
+      line: { color: '#3b82f6', width: 2 },
+      hovertemplate: `%{x|%b %d %H:%M}<br>Cumulative: %{y:.1f} mm<extra></extra>`
+    }], {
+      paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { family: 'DM Sans', color: '#8896b3', size: 11 },
+      margin: { l: 50, r: 20, t: 10, b: 40 },
+      xaxis: { gridcolor: 'rgba(42,58,92,0.5)', tickformat: '%b %d\n%H:%M' },
+      yaxis: { gridcolor: 'rgba(42,58,92,0.5)', title: 'mm' },
+      height: 250,
+    }, { responsive: true, displayModeBar: false });
+  }
+
+  // 3) Box plot per day
+  const boxDiv = document.createElement('div');
+  boxDiv.className = 'chart-box fade-in';
+  boxDiv.style.animationDelay = '0.15s';
+  boxDiv.innerHTML = `<div class="chart-title"><span class="dot" style="background:var(--accent-teal)"></span>Spatial Spread per Day</div><div id="boxPlot"></div>`;
+  container.appendChild(boxDiv);
+
+  // Group by day
+  const dayMap = {};
+  for (let t = 0; t < nT; t++) {
+    const day = times[t].slice(0, 10);
+    if (!dayMap[day]) dayMap[day] = [];
+    for (let p = 0; p < values2D.length; p++) {
+      const v = values2D[p]?.[t];
+      if (v != null) dayMap[day].push(v);
+    }
+  }
+  const boxTraces = Object.entries(dayMap).map(([day, vals]) => ({
+    y: vals, type: 'box', name: day, marker: { color: '#14b8a6' },
+    line: { color: '#14b8a6' }, fillcolor: 'rgba(20,184,166,0.2)'
+  }));
+
+  Plotly.newPlot('boxPlot', boxTraces, {
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    font: { family: 'DM Sans', color: '#8896b3', size: 11 },
+    margin: { l: 50, r: 20, t: 10, b: 40 },
+    xaxis: { gridcolor: 'rgba(42,58,92,0.5)' },
+    yaxis: { gridcolor: 'rgba(42,58,92,0.5)', title: unit },
+    showlegend: false,
+    height: 260,
+  }, { responsive: true, displayModeBar: false });
+}
+
+// ══════════════════════════════════════
+//  RENDER CONTOUR MAP
+// ══════════════════════════════════════
+function renderContour() {
+  if (!fetchedData) return;
+  const { gridPoints, values2D, unit, label, times } = fetchedData;
+  const tIdx = parseInt(document.getElementById('contourTimestep').value) || 0;
+  const container = document.getElementById('contourContainer');
+
+  // Extract lat, lng, values at this timestep
+  const lats = gridPoints.map(p => p.lat);
+  const lngs = gridPoints.map(p => p.lng);
+  const vals = gridPoints.map((_, i) => values2D[i]?.[tIdx] ?? 0);
+
+  if (gridPoints.length < 4) {
+    container.innerHTML = `<div class="empty-state"><p>Need at least 4 grid points for contour interpolation. Try a larger polygon or finer resolution.</p></div>`;
+    return;
+  }
+
+  const timeLabel = times[tIdx] ? new Date(times[tIdx]).toUTCString().replace('GMT', 'UTC') : '';
+
+  container.innerHTML = `
+    <div class="chart-box fade-in">
+      <div class="chart-title"><span class="dot" style="background:var(--accent-orange)"></span>${label} Contour — ${timeLabel}</div>
+      <div id="contourPlot"></div>
+    </div>
+    <div class="chart-box fade-in" style="animation-delay:0.1s">
+      <div class="chart-title"><span class="dot" style="background:var(--accent-green)"></span>${label} Heatmap — ${timeLabel}</div>
+      <div id="heatPlot"></div>
+    </div>
+  `;
+
+  // Determine colorscale based on variable
+  const colorscaleMap = {
+    precipitation: [[0,'#f0f9ff'],[0.2,'#bae6fd'],[0.4,'#38bdf8'],[0.6,'#0284c7'],[0.8,'#1e40af'],[1,'#312e81']],
+    temperature_2m: [[0,'#1e3a5f'],[0.2,'#2563eb'],[0.4,'#06b6d4'],[0.5,'#fbbf24'],[0.7,'#f97316'],[0.85,'#dc2626'],[1,'#7f1d1d']],
+    relative_humidity_2m: [[0,'#fef3c7'],[0.5,'#06b6d4'],[1,'#1e3a5f']],
+    wind_speed_10m: [[0,'#ecfdf5'],[0.3,'#34d399'],[0.6,'#f59e0b'],[1,'#dc2626']],
+    cloud_cover: [[0,'#0c4a6e'],[0.5,'#94a3b8'],[1,'#f1f5f9']],
+    surface_pressure: [[0,'#312e81'],[0.5,'#06b6d4'],[1,'#fef3c7']],
+    soil_moisture_0_to_7cm: [[0,'#fef3c7'],[0.3,'#84cc16'],[0.6,'#0d9488'],[1,'#1e3a5f']],
+    et0_fao_evapotranspiration: [[0,'#ecfdf5'],[0.5,'#06b6d4'],[1,'#7c3aed']]
+  };
+  const cs = colorscaleMap[fetchedData.variable] || 'Viridis';
+
+  // Contour plot
+  Plotly.newPlot('contourPlot', [{
+    x: lngs, y: lats, z: vals,
+    type: 'contour',
+    colorscale: cs,
+    contours: { coloring: 'heatmap', showlabels: true, labelfont: { size: 10, color: 'white' } },
+    colorbar: { title: unit, titlefont: { size: 11 }, tickfont: { size: 10 } },
+    hovertemplate: `Lat: %{y:.3f}<br>Lng: %{x:.3f}<br>${label}: %{z:.2f} ${unit}<extra></extra>`,
+    ncontours: 15,
+  }], {
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(26,34,54,1)',
+    font: { family: 'DM Sans', color: '#8896b3', size: 11 },
+    margin: { l: 60, r: 20, t: 10, b: 50 },
+    xaxis: { title: 'Longitude', gridcolor: 'rgba(42,58,92,0.5)', scaleanchor: 'y' },
+    yaxis: { title: 'Latitude', gridcolor: 'rgba(42,58,92,0.5)' },
+    height: 450,
+  }, { responsive: true, displayModeBar: true });
+
+  // Heatmap (scatter with color)
+  Plotly.newPlot('heatPlot', [{
+    x: lngs, y: lats,
+    mode: 'markers',
+    type: 'scatter',
+    marker: {
+      size: 16,
+      color: vals,
+      colorscale: cs,
+      showscale: true,
+      colorbar: { title: unit, titlefont: { size: 11 }, tickfont: { size: 10 } },
+      line: { width: 1, color: 'rgba(255,255,255,0.15)' }
+    },
+    text: vals.map((v, i) => `(${lats[i].toFixed(2)}, ${lngs[i].toFixed(2)}): ${v?.toFixed(2)} ${unit}`),
+    hovertemplate: `Lat: %{y:.3f}<br>Lng: %{x:.3f}<br>${label}: %{marker.color:.2f} ${unit}<extra></extra>`,
+  }], {
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(26,34,54,1)',
+    font: { family: 'DM Sans', color: '#8896b3', size: 11 },
+    margin: { l: 60, r: 20, t: 10, b: 50 },
+    xaxis: { title: 'Longitude', gridcolor: 'rgba(42,58,92,0.5)', scaleanchor: 'y' },
+    yaxis: { title: 'Latitude', gridcolor: 'rgba(42,58,92,0.5)' },
+    height: 400,
+  }, { responsive: true, displayModeBar: true });
+}
+
+// ── Listen for config changes ──
+document.getElementById('resolutionSelect').addEventListener('change', updateGridInfo);
+
+// ── Init ──
+initMap();
+</script>
+</body>
+</html>
