@@ -433,6 +433,7 @@
     const PARAMS_CONFIG = [
       { key: 't_2m',      label: 'Temperature 2m',   accent: 'text-orange-300', ramp: 'turbo',    unit: '°C',   decimals: 1, convert: v => v - 273.15, zeroTransparent: false, sparkColor: '#fb923c' },
       { key: 'tot_prec',  label: 'Precipitation',     accent: 'text-blue-300',   ramp: 'ylgnbu',   unit: 'mm',   decimals: 2, convert: v => v,          zeroTransparent: true,  sparkColor: '#60a5fa' },
+      { key: 'wind_10m',  label: 'Wind Flow 10m',     accent: 'text-violet-300', ramp: 'plasma',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#c4b5fd' },
       { key: 'u_10m',     label: 'Wind U 10m',        accent: 'text-purple-300', ramp: 'rdylbu',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#a78bfa' },
       { key: 'v_10m',     label: 'Wind V 10m',        accent: 'text-purple-300', ramp: 'rdylbu',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#c4b5fd' },
       { key: 'pmsl',      label: 'Pressure MSL',      accent: 'text-green-300',  ramp: 'spectral', unit: 'hPa',  decimals: 1, convert: v => v / 100,    zeroTransparent: false, sparkColor: '#34d399' },
@@ -457,6 +458,8 @@
     let stepsArray = null;        // actual forecast hour values [0,1,...,78,81,84,...,120]
     let runInitTime = null;       // Date object of model init
     let sliceData = null;         // Float32Array [nSteps, latPx, lonPx]
+    let windUSliceData = null;    // Float32Array [nSteps, latPx, lonPx] for wind_10m
+    let windVSliceData = null;    // Float32Array [nSteps, latPx, lonPx] for wind_10m
     let sliceBounds = null;       // { south, west, north, east, latStart, latEnd, lonStart, lonEnd, nLat, nLon }
     let currentStep = 0;
     let playing = false;
@@ -473,6 +476,35 @@
     let renderCtx = null;
     let panelVisible = false; // mobile panel state (desktop always visible via sm:block)
     function isMobile() { return window.innerWidth < 640; }
+
+    function isWindCompositeParam(param = currentParam) {
+      return param === 'wind_10m';
+    }
+
+    function speedFromUV(u, v) {
+      if (!Number.isFinite(u) || !Number.isFinite(v)) return NaN;
+      return Math.hypot(u, v);
+    }
+
+    function windDirFromUV(u, v) {
+      if (!Number.isFinite(u) || !Number.isFinite(v)) return NaN;
+      // Meteorological bearing: direction the wind is coming from.
+      return (270 - (Math.atan2(v, u) * 180 / Math.PI) + 360) % 360;
+    }
+
+    function getGridValue(data, stepBase, nLon, i, j) {
+      if (!data) return NaN;
+      return data[stepBase + i * nLon + j];
+    }
+
+    function getDisplayRawValue(stepBase, i, j, nLon) {
+      if (isWindCompositeParam()) {
+        const u = getGridValue(windUSliceData, stepBase, nLon, i, j);
+        const v = getGridValue(windVSliceData, stepBase, nLon, i, j);
+        return speedFromUV(u, v);
+      }
+      return getGridValue(sliceData, stepBase, nLon, i, j);
+    }
 
     // =======================================================================
     // Lat/Lon ↔ Array Index Math
@@ -661,6 +693,25 @@
       }
 
       return { data: out, nSteps, nLat, nLon };
+    }
+
+    async function fetchCombinedWindSlice(latStart, latEnd, lonStart, lonEnd) {
+      const [uResult, vResult] = await Promise.all([
+        fetchSlice('u_10m', latStart, latEnd, lonStart, lonEnd),
+        fetchSlice('v_10m', latStart, latEnd, lonStart, lonEnd),
+      ]);
+      const out = new Float32Array(uResult.data.length);
+      for (let idx = 0; idx < out.length; idx++) {
+        out[idx] = speedFromUV(uResult.data[idx], vResult.data[idx]);
+      }
+      return {
+        data: out,
+        uData: uResult.data,
+        vData: vResult.data,
+        nSteps: uResult.nSteps,
+        nLat: uResult.nLat,
+        nLon: uResult.nLon,
+      };
     }
 
     // =======================================================================
@@ -1202,9 +1253,15 @@
       try {
         // Release old data
         sliceData = null;
+        windUSliceData = null;
+        windVSliceData = null;
 
-        const result = await fetchSlice(currentParam, latStart, latEnd, lonStart, lonEnd);
+        const result = isWindCompositeParam()
+          ? await fetchCombinedWindSlice(latStart, latEnd, lonStart, lonEnd)
+          : await fetchSlice(currentParam, latStart, latEnd, lonStart, lonEnd);
         sliceData = result.data;
+        windUSliceData = result.uData || null;
+        windVSliceData = result.vData || null;
 
         // Compute min/max for color scale (excluding NaN)
         computeColorScale();
@@ -1366,7 +1423,7 @@
       return !!(el && el.checked);
     }
 
-    function bilinearSample(arr, base, nLat, nLon, fi, fj) {
+    function bilinearSample(base, nLat, nLon, fi, fj) {
       fi = Math.min(Math.max(fi, 0), nLat - 1 - 1e-9);
       fj = Math.min(Math.max(fj, 0), nLon - 1 - 1e-9);
       const i0 = Math.floor(fi);
@@ -1375,7 +1432,7 @@
       const j1 = Math.min(j0 + 1, nLon - 1);
       const ti = fi - i0;
       const tj = fj - j0;
-      const at = (i, j) => arr[base + i * nLon + j];
+      const at = (i, j) => getDisplayRawValue(base, i, j, nLon);
       const ok = (x) => !isNaN(x) && isFinite(x);
       const v00 = at(i0, j0), v01 = at(i0, j1), v10 = at(i1, j0), v11 = at(i1, j1);
       const w00 = ok(v00) ? (1 - ti) * (1 - tj) : 0;
@@ -1427,7 +1484,7 @@
       renderCtx.lineJoin = 'round';
 
       const gv = (ii, jj) => {
-        const raw = sliceData[stepBase + ii * nLon + jj];
+        const raw = getDisplayRawValue(stepBase, ii, jj, nLon);
         if (isNaN(raw)) return NaN;
         return paramCfg().convert(raw);
       };
@@ -1503,8 +1560,8 @@
           const fj = px / ss;
           const fi = py / ss;
           const val = smooth
-            ? bilinearSample(sliceData, stepBase, nLat, nLon, fi, fj)
-            : sliceData[stepBase + Math.round(fi) * nLon + Math.round(fj)];
+            ? bilinearSample(stepBase, nLat, nLon, fi, fj)
+            : getDisplayRawValue(stepBase, Math.round(fi), Math.round(fj), nLon);
           const [r, g, b, a0] = valueToColor(val);
           const a = Math.round(a0 * layerOp);
           const idx = (py * imgW + px) * 4;
@@ -1519,6 +1576,9 @@
 
       if (wantContours()) {
         drawContoursOverlay(stepBase, nLat, nLon, ss);
+      }
+      if (isWindCompositeParam() && windUSliceData && windVSliceData) {
+        drawWindFlowGlyphs(stepBase, nLat, nLon, ss, layerOp);
       }
 
       const coordinates = [
@@ -1550,6 +1610,59 @@
 
       map.setPaintProperty(DATA_LAYER_ID, 'raster-opacity', getLayerOpacity());
       map.setPaintProperty(DATA_LAYER_ID, 'raster-resampling', smooth ? 'linear' : 'nearest');
+    }
+
+    function drawWindFlowGlyphs(stepBase, nLat, nLon, ss, layerOp) {
+      const maxSamples = isMobile() ? 18 : 26;
+      const stride = Math.max(4, Math.ceil(Math.max(nLat, nLon) / maxSamples));
+      const alphaBoost = Math.max(0.45, Math.min(1, layerOp + 0.15));
+
+      renderCtx.save();
+      renderCtx.globalCompositeOperation = 'screen';
+      renderCtx.lineCap = 'round';
+      renderCtx.lineJoin = 'round';
+
+      for (let i = Math.floor(stride / 2); i < nLat; i += stride) {
+        for (let j = Math.floor(stride / 2); j < nLon; j += stride) {
+          const u = getGridValue(windUSliceData, stepBase, nLon, i, j);
+          const v = getGridValue(windVSliceData, stepBase, nLon, i, j);
+          const speed = speedFromUV(u, v);
+          if (!Number.isFinite(speed) || speed < 0.4) continue;
+
+          const theta = Math.atan2(v, u);
+          const x = j * ss;
+          const y = i * ss;
+          const tail = Math.min(10, 3 + speed * 0.9) * ss;
+          const orbit = Math.min(7, 2 + speed * 0.5) * ss;
+          const alpha = Math.min(0.9, (0.18 + speed * 0.045) * alphaBoost);
+          const hue = (220 + speed * 9) % 360;
+
+          // "Comet glyph" instead of arrows: a curved streak + bright head.
+          renderCtx.strokeStyle = `hsla(${hue}, 95%, 84%, ${alpha})`;
+          renderCtx.lineWidth = Math.max(1, 0.9 * ss);
+          renderCtx.beginPath();
+          renderCtx.moveTo(x - Math.cos(theta) * tail, y - Math.sin(theta) * tail);
+          renderCtx.quadraticCurveTo(
+            x + Math.cos(theta + Math.PI / 2) * orbit * 0.45,
+            y + Math.sin(theta + Math.PI / 2) * orbit * 0.45,
+            x + Math.cos(theta) * tail * 0.45,
+            y + Math.sin(theta) * tail * 0.45
+          );
+          renderCtx.stroke();
+
+          renderCtx.fillStyle = `hsla(${(hue + 28) % 360}, 100%, 90%, ${Math.min(1, alpha + 0.12)})`;
+          renderCtx.beginPath();
+          renderCtx.arc(
+            x + Math.cos(theta) * (tail * 0.58),
+            y + Math.sin(theta) * (tail * 0.58),
+            Math.max(1.2, 1.4 * ss),
+            0,
+            Math.PI * 2
+          );
+          renderCtx.fill();
+        }
+      }
+      renderCtx.restore();
     }
 
     // =======================================================================
@@ -1656,12 +1769,19 @@
       // If we have bounds, re-fetch with new param
       if (sliceBounds) {
         sliceData = null;
+        windUSliceData = null;
+        windVSliceData = null;
         clearDataOverlay();
         document.getElementById('loading').classList.remove('hidden');
 
-        fetchSlice(param, sliceBounds.latStart, sliceBounds.latEnd, sliceBounds.lonStart, sliceBounds.lonEnd)
+        const fetcher = isWindCompositeParam(param)
+          ? fetchCombinedWindSlice(sliceBounds.latStart, sliceBounds.latEnd, sliceBounds.lonStart, sliceBounds.lonEnd)
+          : fetchSlice(param, sliceBounds.latStart, sliceBounds.latEnd, sliceBounds.lonStart, sliceBounds.lonEnd);
+        fetcher
           .then(result => {
             sliceData = result.data;
+            windUSliceData = result.uData || null;
+            windVSliceData = result.vData || null;
             computeColorScale();
             renderLegend();
             renderFrame();
@@ -1695,9 +1815,18 @@
       }
 
       const nSteps = stepsArray ? stepsArray.length : 93;
-      const val = sliceData[currentStep * nLat * nLon + gi * nLon + gj];
+      const stepBase = currentStep * nLat * nLon;
+      const val = getDisplayRawValue(stepBase, gi, gj, nLon);
       const { unit, decimals, convert, sparkColor } = paramCfg();
-      const displayVal = isNaN(val) ? 'No data' : `${convert(val).toFixed(decimals)} ${unit}`;
+      let displayVal = isNaN(val) ? 'No data' : `${convert(val).toFixed(decimals)} ${unit}`;
+      if (isWindCompositeParam() && windUSliceData && windVSliceData && !isNaN(val)) {
+        const u = getGridValue(windUSliceData, stepBase, nLon, gi, gj);
+        const v = getGridValue(windVSliceData, stepBase, nLon, gi, gj);
+        const bearing = windDirFromUV(u, v);
+        if (Number.isFinite(bearing)) {
+          displayVal += ` • from ${bearing.toFixed(0)}°`;
+        }
+      }
 
       const latLabel = lat >= 0 ? `${lat.toFixed(3)}°N` : `${(-lat).toFixed(3)}°S`;
       const lonLabel = lon >= 0 ? `${lon.toFixed(3)}°E` : `${(-lon).toFixed(3)}°W`;
@@ -1711,7 +1840,8 @@
 
       const series = [];
       for (let s = 0; s < nSteps; s++) {
-        series.push(sliceData[s * nLat * nLon + gi * nLon + gj]);
+        const sBase = s * nLat * nLon;
+        series.push(getDisplayRawValue(sBase, gi, gj, nLon));
       }
 
       let sMin = Infinity, sMax = -Infinity;
