@@ -85,6 +85,7 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
+      max-parallel: 4
       matrix:
         parameter:
           - t_2m
@@ -143,7 +144,9 @@ jobs:
           # 1. Download official ICON Global native grid (R03B07 / ~13km)
           GRID_URL="https://opendata.dwd.de/weather/lib/cdo/icon_grid_0026_R03B07_G.nc.bz2"
           echo "::group::Download native grid"
-          curl -fsSL -o /tmp/icon_grid.nc.bz2 "$GRID_URL"
+          curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors \
+               --connect-timeout 30 --max-time 600 \
+               -o /tmp/icon_grid.nc.bz2 "$GRID_URL"
           bunzip2 -f /tmp/icon_grid.nc.bz2
           mv /tmp/icon_grid.nc "$ASSETS/icon_grid_R03B07_G.nc"
           echo "::endgroup::"
@@ -155,7 +158,9 @@ jobs:
             for hh in 18 12 06 00; do
               URL="https://opendata.dwd.de/weather/nwp/icon/grib/${hh}/t_2m/icon_global_icosahedral_single-level_${RUN_DATE}${hh}_000_T_2M.grib2.bz2"
               echo "Trying: $URL"
-              if curl -fsSL -o /tmp/sample.grib2.bz2 "$URL"; then
+              if curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+                      --connect-timeout 30 --max-time 300 \
+                      -o /tmp/sample.grib2.bz2 "$URL"; then
                 got=1
                 echo "OK: $URL"
                 break
@@ -168,7 +173,9 @@ jobs:
               for hh in 18 12 06 00; do
                 URL="https://opendata.dwd.de/weather/nwp/icon/grib/${hh}/t_2m/icon_global_icosahedral_single-level_${D}${hh}_000_T_2M.grib2.bz2"
                 echo "Trying: $URL"
-                if curl -fsSL -o /tmp/sample.grib2.bz2 "$URL"; then
+                if curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+                      --connect-timeout 30 --max-time 300 \
+                      -o /tmp/sample.grib2.bz2 "$URL"; then
                   got=1
                   echo "OK: $URL"
                   break 2
@@ -255,11 +262,16 @@ jobs:
     if: always()
 
     steps:
-      - name: Check all ETL jobs succeeded
+      - name: Check ETL job outcome
         run: |
-          if [ "${{ needs.etl.result }}" != "success" ]; then
-            echo "::error::One or more ETL parameter jobs failed. Aborting promotion."
+          # Abort only if the matrix was cancelled — partial failures are OK
+          # because we discover successfully-staged params from R2 below.
+          if [ "${{ needs.etl.result }}" = "cancelled" ]; then
+            echo "::error::ETL matrix was cancelled. Aborting promotion."
             exit 1
+          fi
+          if [ "${{ needs.etl.result }}" != "success" ]; then
+            echo "::warning::Some ETL parameter jobs failed — will promote only params with _SUCCESS markers."
           fi
 
       - name: Checkout
@@ -276,13 +288,45 @@ jobs:
           pip install --upgrade pip
           pip install xarray dask zarr s3fs numcodecs numpy requests netCDF4
 
+      - name: Discover successfully staged parameters
+        id: discover
+        env:
+          CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RUN_DATE:             ${{ needs.resolve-run.outputs.run_date }}
+          MODEL_RUN:            ${{ needs.resolve-run.outputs.model_run }}
+        run: |
+          ALL_PARAMS="t_2m tot_prec u_10m v_10m pmsl clct relhum_2m aswdir_s td_2m vmax_10m asob_s alhfl_s runoff_s runoff_g"
+          python - <<'PY' "$RUN_DATE$MODEL_RUN" $ALL_PARAMS
+          import os, sys, s3fs
+          run_dt, *params = sys.argv[1:]
+          fs = s3fs.S3FileSystem(
+              key=os.environ["R2_ACCESS_KEY_ID"],
+              secret=os.environ["R2_SECRET_ACCESS_KEY"],
+              client_kwargs={"endpoint_url": f"https://{os.environ['CF_ACCOUNT_ID']}.r2.cloudflarestorage.com"},
+          )
+          ok = [p for p in params if fs.exists(f"icon-global-databank/staging/{run_dt}/{p}/_SUCCESS")]
+          missing = [p for p in params if p not in ok]
+          print(f"Staged OK ({len(ok)}): {ok}")
+          print(f"Missing  ({len(missing)}): {missing}")
+          if not ok:
+              print("::error::No parameters staged successfully — nothing to promote.")
+              sys.exit(1)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"params={' '.join(ok)}\n")
+              f.write(f"missing={' '.join(missing)}\n")
+          PY
+
       - name: Validate + Promote + Janitor
         env:
           MODEL_RUN: ${{ needs.resolve-run.outputs.model_run }}
           RUN_DATE:  ${{ needs.resolve-run.outputs.run_date }}
+          PROMOTE_PARAMS: ${{ steps.discover.outputs.params }}
         run: |
           START=$(date -u +%s)
           echo "::group::Validation & Promotion — run=${RUN_DATE}${MODEL_RUN}"
+          echo "Promoting params: $PROMOTE_PARAMS"
 
           ENSEMBLE_FLAG=""
           if [ "$ENABLE_ENSEMBLE" = "true" ]; then
@@ -294,7 +338,7 @@ jobs:
             --run-date  "$RUN_DATE"  \
             --keep-runs "$KEEP_RUNS" \
             --validate-only \
-            --params t_2m tot_prec u_10m v_10m pmsl clct relhum_2m aswdir_s td_2m vmax_10m asob_s alhfl_s runoff_s runoff_g \
+            --params $PROMOTE_PARAMS \
             $ENSEMBLE_FLAG
 
           END=$(date -u +%s)

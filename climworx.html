@@ -9,8 +9,11 @@
 
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+  <script src="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.20/leaflet-maplibre-gl.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.27.1/plotly.min.js"></script>
 
   <style>
@@ -276,16 +279,85 @@ function getWindDirVar(v) {
   return v.replace('wind_speed_', 'wind_direction_');
 }
 
+const BASEMAP_DARK_URL = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+const BASEMAP_TOPO_URL  = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
+let PATCHED_DARK_STYLE = null;
+let PATCHED_TOPO_STYLE = null;
+let darkStyleLoadPromise = null;
+let topoStyleLoadPromise  = null;
+
+function patchStyleJson(style) {
+  if (!style || !style.layers) return style;
+  const nameEqIsrael = ['==', ['coalesce', ['get', 'name_en'], ['get', 'name:en'], ['get', 'name'], ''], 'Israel'];
+  function wrapIsrael(leaf) { return ['case', nameEqIsrael, 'Palestine', leaf]; }
+  function leafFromToken(val) {
+    if (typeof val === 'string') {
+      const m = /^\s*\{([^}]+)\}\s*$/.exec(val);
+      if (m) return ['get', m[1]];
+      return ['literal', val];
+    }
+    return ['literal', ''];
+  }
+  function patchedTextFieldFromStops(stopsRaw) {
+    const stops = [...stopsRaw].sort((a, b) => a[0] - b[0]);
+    if (stops.length === 0) return null;
+    const expr = ['step', ['zoom'], wrapIsrael(leafFromToken(stops[0][1]))];
+    for (let i = 1; i < stops.length; i++) { expr.push(stops[i][0]); expr.push(wrapIsrael(leafFromToken(stops[i][1]))); }
+    return expr;
+  }
+  for (const layer of style.layers) {
+    if (layer.type !== 'symbol') continue;
+    if (!layer.layout || !layer.layout['text-field']) continue;
+    const textField = layer.layout['text-field'];
+    if (Array.isArray(textField) && textField[0] === 'case' && textField[2] === 'Palestine') continue;
+    if (typeof textField === 'string') {
+      const match = /^\s*\{([^}]+)\}\s*$/.exec(textField);
+      if (match) { layer.layout['text-field'] = wrapIsrael(['get', match[1]]); }
+      else if (textField === 'Israel') { layer.layout['text-field'] = 'Palestine'; }
+      continue;
+    }
+    if (textField && typeof textField === 'object' && !Array.isArray(textField) && Array.isArray(textField.stops)) {
+      const patched = patchedTextFieldFromStops(textField.stops);
+      if (patched) layer.layout['text-field'] = patched;
+    }
+  }
+  return style;
+}
+
+function makePatchedStyleLoader(url, cacheRef, promiseRef, cacheSet, promiseSet) {
+  return function () {
+    if (cacheRef()) return Promise.resolve(cacheRef());
+    if (!promiseRef()) {
+      promiseSet(fetch(url).then(r => r.json())
+        .then(json => {
+          const copy = typeof structuredClone === 'function' ? structuredClone(json) : JSON.parse(JSON.stringify(json));
+          const patched = patchStyleJson(copy);
+          cacheSet(patched);
+          return patched;
+        })
+        .catch(e => { console.error('Failed to load style', url, e); promiseSet(null); return null; }));
+    }
+    return promiseRef();
+  };
+}
+
+const ensurePatchedDarkStyle = makePatchedStyleLoader(
+  BASEMAP_DARK_URL,
+  () => PATCHED_DARK_STYLE, () => darkStyleLoadPromise,
+  v => { PATCHED_DARK_STYLE = v; }, v => { darkStyleLoadPromise = v; }
+);
+const ensurePatchedTopoStyle = makePatchedStyleLoader(
+  BASEMAP_TOPO_URL,
+  () => PATCHED_TOPO_STYLE, () => topoStyleLoadPromise,
+  v => { PATCHED_TOPO_STYLE = v; }, v => { topoStyleLoadPromise = v; }
+);
+
 const basemaps = {
   satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
     attribution: '&copy; Esri', maxZoom: 19
   }),
-  dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; CARTO', subdomains: 'abcd', maxZoom: 19
-  }),
-  topo: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {
-    attribution: '&copy; Esri', maxZoom: 19
-  })
+  dark: null,  // lazy: L.maplibreGL with Carto dark-matter GL + Palestine patch
+  topo: null,  // lazy: L.maplibreGL with Carto Voyager GL + Palestine patch
 };
 let currentBasemap = 'satellite';
 
@@ -403,23 +475,40 @@ function initMap() {
   setInterval(updateRunTime, 60000);
 }
 
-function setBasemap(name) {
+function updateBasemapButtons(name) {
+  const active   = 'py-2 text-[11px] sm:text-xs font-medium transition-all bg-emerald-500/25 text-emerald-200';
+  const inactive = 'py-2 text-[11px] sm:text-xs font-medium transition-all text-white/40';
+  document.getElementById('btn-bm-satellite').className = name === 'satellite' ? active : inactive;
+  document.getElementById('btn-bm-dark').className      = name === 'dark'      ? active : inactive;
+  document.getElementById('btn-bm-topo').className      = name === 'topo'      ? active : inactive;
+  const attrib = document.getElementById('basemap-attrib');
+  if (attrib) {
+    if (name === 'satellite') attrib.textContent = 'Imagery © Esri, Maxar, Earthstar Geographics';
+    else if (name === 'dark') attrib.textContent = '© CARTO';
+    else                      attrib.textContent = '© CARTO Voyager';
+  }
+}
+
+async function setBasemap(name) {
   if (currentBasemap === name) return;
-  map.removeLayer(basemaps[currentBasemap]);
+  if (basemaps[currentBasemap]) map.removeLayer(basemaps[currentBasemap]);
+
+  // Update UI immediately — don't wait for async style load
+  currentBasemap = name;
+  updateBasemapButtons(name);
+
+  // Lazily build GL vector layers with patched Palestine labels
+  if (name === 'dark' && !basemaps.dark) {
+    const style = await ensurePatchedDarkStyle();
+    basemaps.dark = L.maplibreGL({ style: style || BASEMAP_DARK_URL, attribution: '© CARTO' });
+  }
+  if (name === 'topo' && !basemaps.topo) {
+    const style = await ensurePatchedTopoStyle();
+    basemaps.topo = L.maplibreGL({ style: style || BASEMAP_TOPO_URL, attribution: '© CARTO Voyager' });
+  }
+
   basemaps[name].addTo(map);
   basemaps[name].bringToBack();
-  currentBasemap = name;
-  document.getElementById('btn-bm-satellite').className =
-    'py-2 text-[11px] sm:text-xs font-medium transition-all ' + (name === 'satellite' ? 'bg-emerald-500/25 text-emerald-200' : 'text-white/40');
-  document.getElementById('btn-bm-dark').className =
-    'py-2 text-[11px] sm:text-xs font-medium transition-all ' + (name === 'dark' ? 'bg-emerald-500/25 text-emerald-200' : 'text-white/40');
-  document.getElementById('btn-bm-topo').className =
-    'py-2 text-[11px] sm:text-xs font-medium transition-all ' + (name === 'topo' ? 'bg-emerald-500/25 text-emerald-200' : 'text-white/40');
-
-  const attrib = document.getElementById('basemap-attrib');
-  if (name === 'satellite') attrib.textContent = 'Imagery © Esri, Maxar, Earthstar Geographics';
-  else if (name === 'dark') attrib.textContent = '© CARTO';
-  else attrib.textContent = 'Topo © Esri';
 }
 
 function updateRunTime() {

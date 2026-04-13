@@ -120,14 +120,18 @@
     <!-- Basemap -->
     <div>
       <div class="text-[10px] uppercase tracking-wider text-white/40 mb-1.5">Basemap</div>
-      <div class="flex rounded-xl overflow-hidden border border-white/10">
-        <button type="button" id="btn-basemap-imagery" class="flex-1 py-2 text-sm font-medium transition-all bg-emerald-500/25 text-emerald-200 border-r border-white/10"
+      <div class="grid grid-cols-3 rounded-xl overflow-hidden border border-white/10 gap-px bg-white/10">
+        <button type="button" id="btn-basemap-imagery" class="py-2 text-[11px] sm:text-xs font-medium transition-all bg-emerald-500/25 text-emerald-200"
                 onclick="switchBasemap('imagery')">
           Satellite
         </button>
-        <button type="button" id="btn-basemap-dark" class="flex-1 py-2 text-sm font-medium transition-all text-white/40"
+        <button type="button" id="btn-basemap-dark" class="py-2 text-[11px] sm:text-xs font-medium transition-all text-white/40"
                 onclick="switchBasemap('dark')">
           Dark
+        </button>
+        <button type="button" id="btn-basemap-topo" class="py-2 text-[11px] sm:text-xs font-medium transition-all text-white/40"
+                onclick="switchBasemap('topo')">
+          Topo
         </button>
       </div>
       <p id="basemap-attrib" class="text-[10px] text-white/35 mt-1.5 leading-snug">
@@ -316,6 +320,33 @@
 
     const BASEMAP_DARK_URL =
       'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+
+    /** Esri World Topo (XYZ raster) — contour lines, terrain shading, place labels. */
+    const BASEMAP_TOPO_STYLE = {
+      version: 8,
+      name: 'World Topo',
+      glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+      sources: {
+        esri_topo: {
+          type: 'raster',
+          tiles: [
+            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
+          ],
+          tileSize: 256,
+          attribution: '<a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>',
+          maxzoom: 19,
+        },
+      },
+      layers: [
+        {
+          id: 'esri_world_topo',
+          type: 'raster',
+          source: 'esri_topo',
+          minzoom: 0,
+          maxzoom: 22,
+        },
+      ],
+    };
 
     /** Esri World Imagery (XYZ raster) — no API key; attribution required for display. */
     const BASEMAP_IMAGERY_STYLE = {
@@ -626,19 +657,21 @@
     }
 
     function updateBasemapToggleUI() {
-      const isDark = currentBasemap === 'dark';
+      const mode = currentBasemap;
+      const active = 'py-2 text-[11px] sm:text-xs font-medium transition-all bg-emerald-500/25 text-emerald-200';
+      const inactive = 'py-2 text-[11px] sm:text-xs font-medium transition-all text-white/40';
+      const btnImg  = document.getElementById('btn-basemap-imagery');
       const btnDark = document.getElementById('btn-basemap-dark');
-      const btnImg = document.getElementById('btn-basemap-imagery');
-      const attrib = document.getElementById('basemap-attrib');
-      if (btnImg) {
-        btnImg.className = `flex-1 py-2 text-sm font-medium transition-all border-r border-white/10 ${
-          !isDark ? 'bg-emerald-500/25 text-emerald-200' : 'text-white/40 hover:text-white/60'}`;
+      const btnTopo = document.getElementById('btn-basemap-topo');
+      const attrib  = document.getElementById('basemap-attrib');
+      if (btnImg)  btnImg.className  = mode === 'imagery' ? active : inactive;
+      if (btnDark) btnDark.className = mode === 'dark'    ? active : inactive;
+      if (btnTopo) btnTopo.className = mode === 'topo'    ? active : inactive;
+      if (attrib) {
+        attrib.classList.toggle('hidden', mode === 'dark');
+        if (mode === 'imagery') attrib.textContent = 'Imagery © Esri, Maxar, Earthstar Geographics';
+        if (mode === 'topo')    attrib.textContent = 'Topo © Esri';
       }
-      if (btnDark) {
-        btnDark.className = `flex-1 py-2 text-sm font-medium transition-all ${
-          isDark ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/60'}`;
-      }
-      if (attrib) attrib.classList.toggle('hidden', isDark);
     }
 
     let PATCHED_DARK_STYLE = null;
@@ -750,7 +783,7 @@
      */
     window.switchBasemap = async function (mode) {
       if (!map || mode === currentBasemap) return;
-      if (mode !== 'dark' && mode !== 'imagery') return;
+      if (mode !== 'dark' && mode !== 'imagery' && mode !== 'topo') return;
       if (!mapInitialLoadDone) {
         showToast('Wait for the map to finish loading before changing basemap.', 'info');
         return;
@@ -777,6 +810,8 @@
       let style;
       if (mode === 'imagery') {
         style = BASEMAP_IMAGERY_STYLE;
+      } else if (mode === 'topo') {
+        style = BASEMAP_TOPO_STYLE;
       } else {
         const loaded = await ensurePatchedDarkStyle();
         style = loaded || BASEMAP_DARK_URL;
