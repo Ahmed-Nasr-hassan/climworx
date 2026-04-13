@@ -89,7 +89,7 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "td_2m":     (180.0, 320.0),        # K (dew point, always ≤ t_2m)
     "vmax_10m":  (0.0, 120.0),          # m/s (wind gust)
     "asob_s":    (-200.0, 1400.0),      # W/m² (net shortwave; negative at night)
-    "alhfl_s":   (-600.0, 800.0),       # W/m² (latent heat flux)
+    "alhfl_s":   (-800.0, 800.0),       # W/m² (latent heat flux; strong evaporation can be < -600)
     "runoff_s":  (0.0, 500.0),          # kg/m² (surface runoff, accumulated)
     "runoff_g":  (0.0, 500.0),          # kg/m² (subsurface/groundwater runoff, accumulated)
 }
