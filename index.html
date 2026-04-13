@@ -1018,6 +1018,7 @@
         mapInitialLoadDone = true;
         attachDrawControl();
         bindDrawEvents();
+        ensureWindOverlay();
       });
 
       // Offscreen canvas for value->color mapping; MapLibre renders it via ImageSource.
@@ -1156,6 +1157,8 @@
       if (!map) return;
       if (map.getLayer(DATA_LAYER_ID)) map.removeLayer(DATA_LAYER_ID);
       if (map.getSource(DATA_SOURCE_ID)) map.removeSource(DATA_SOURCE_ID);
+      windStreamlines = null;
+      clearWindOverlay();
     }
 
     // =======================================================================
@@ -1577,10 +1580,6 @@
       if (wantContours()) {
         drawContoursOverlay(stepBase, nLat, nLon, ss);
       }
-      if (isWindCompositeParam() && windUSliceData && windVSliceData) {
-        drawWindFlowGlyphs(stepBase, nLat, nLon, ss, layerOp);
-      }
-
       const coordinates = [
         [indexToLon(lonStart), indexToLat(latStart)],
         [indexToLon(lonStart + nLon), indexToLat(latStart)],
@@ -1610,59 +1609,227 @@
 
       map.setPaintProperty(DATA_LAYER_ID, 'raster-opacity', getLayerOpacity());
       map.setPaintProperty(DATA_LAYER_ID, 'raster-resampling', smooth ? 'linear' : 'nearest');
+
+      if (isWindCompositeParam() && windUSliceData && windVSliceData) {
+        computeWindStreamlines();
+        redrawWindOverlay();
+      } else {
+        windStreamlines = null;
+        clearWindOverlay();
+      }
     }
 
-    function drawWindFlowGlyphs(stepBase, nLat, nLon, ss, layerOp) {
-      const maxSamples = isMobile() ? 18 : 26;
-      const stride = Math.max(4, Math.ceil(Math.max(nLat, nLon) / maxSamples));
-      const alphaBoost = Math.max(0.45, Math.min(1, layerOp + 0.15));
+    /**
+     * Bilinear sample of (u,v) at fractional grid indices.
+     * Grid: i increases south, j increases east — integrate with dfi ∝ -v, dfj ∝ u so flow follows meteorological wind.
+     */
+    function bilinearWindUV(stepBase, nLat, nLon, fi, fj) {
+      fi = Math.min(Math.max(fi, 0), nLat - 1 - 1e-9);
+      fj = Math.min(Math.max(fj, 0), nLon - 1 - 1e-9);
+      const i0 = Math.floor(fi);
+      const i1 = Math.min(i0 + 1, nLat - 1);
+      const j0 = Math.floor(fj);
+      const j1 = Math.min(j0 + 1, nLon - 1);
+      const ti = fi - i0;
+      const tj = fj - j0;
+      const uAt = (i, j) => getGridValue(windUSliceData, stepBase, nLon, i, j);
+      const vAt = (i, j) => getGridValue(windVSliceData, stepBase, nLon, i, j);
+      const ok = (x) => Number.isFinite(x);
+      const u00 = uAt(i0, j0), u01 = uAt(i0, j1), u10 = uAt(i1, j0), u11 = uAt(i1, j1);
+      const v00 = vAt(i0, j0), v01 = vAt(i0, j1), v10 = vAt(i1, j0), v11 = vAt(i1, j1);
+      const w00 = ok(u00) && ok(v00) ? (1 - ti) * (1 - tj) : 0;
+      const w01 = ok(u01) && ok(v01) ? (1 - ti) * tj : 0;
+      const w10 = ok(u10) && ok(v10) ? ti * (1 - tj) : 0;
+      const w11 = ok(u11) && ok(v11) ? ti * tj : 0;
+      const wsum = w00 + w01 + w10 + w11;
+      if (wsum < 1e-12) return { u: NaN, v: NaN };
+      const u = (w00 * u00 + w01 * u01 + w10 * u10 + w11 * u11) / wsum;
+      const v = (w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11) / wsum;
+      return { u, v };
+    }
 
-      renderCtx.save();
-      renderCtx.globalCompositeOperation = 'screen';
-      renderCtx.lineCap = 'round';
-      renderCtx.lineJoin = 'round';
+    function traceWindStreamSegment(stepBase, nLat, nLon, fi0, fj0, dirSign, maxSteps, stepLen, minSpeed) {
+      const pts = [];
+      let fi = fi0;
+      let fj = fj0;
+      for (let s = 0; s < maxSteps; s++) {
+        const { u, v } = bilinearWindUV(stepBase, nLat, nLon, fi, fj);
+        const sp = Math.hypot(u, v);
+        if (!Number.isFinite(sp) || sp < minSpeed) break;
+        const dfi = dirSign * (-v / sp) * stepLen;
+        const dfj = dirSign * (u / sp) * stepLen;
+        fi += dfi;
+        fj += dfj;
+        if (fi < 0 || fi > nLat - 1 || fj < 0 || fj > nLon - 1) break;
+        pts.push({ x: fj, y: fi });
+      }
+      return pts;
+    }
 
-      for (let i = Math.floor(stride / 2); i < nLat; i += stride) {
-        for (let j = Math.floor(stride / 2); j < nLon; j += stride) {
-          const u = getGridValue(windUSliceData, stepBase, nLon, i, j);
-          const v = getGridValue(windVSliceData, stepBase, nLon, i, j);
-          const speed = speedFromUV(u, v);
-          if (!Number.isFinite(speed) || speed < 0.4) continue;
+    /** Filled micro-arrow in canvas space; angle = flow direction (radians, canvas x/y). */
+    function drawMicroArrowOnStream(ctx, x, y, angle, size, alpha) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(angle);
+      ctx.beginPath();
+      ctx.moveTo(size, 0);
+      ctx.lineTo(-size * 0.42, -size * 0.32);
+      ctx.lineTo(-size * 0.22, 0);
+      ctx.lineTo(-size * 0.42, size * 0.32);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+      ctx.fill();
+      ctx.lineWidth = 0.7;
+      ctx.strokeStyle = `rgba(8,14,28,${Math.min(0.7, alpha * 0.8)})`;
+      ctx.stroke();
+      ctx.restore();
+    }
 
-          const theta = Math.atan2(v, u);
-          const x = j * ss;
-          const y = i * ss;
-          const tail = Math.min(10, 3 + speed * 0.9) * ss;
-          const orbit = Math.min(7, 2 + speed * 0.5) * ss;
-          const alpha = Math.min(0.9, (0.18 + speed * 0.045) * alphaBoost);
-          const hue = (220 + speed * 9) % 360;
+    // Wind streamlines — drawn on a screen-space overlay so lines stay crisp
+    // at any zoom instead of being baked into the raster and stretched.
+    let windOverlayCanvas = null;
+    let windOverlayCtx = null;
+    let windStreamlines = null; // [{ pts:[{lat,lon}], speed }]
 
-          // "Comet glyph" instead of arrows: a curved streak + bright head.
-          renderCtx.strokeStyle = `hsla(${hue}, 95%, 84%, ${alpha})`;
-          renderCtx.lineWidth = Math.max(1, 0.9 * ss);
-          renderCtx.beginPath();
-          renderCtx.moveTo(x - Math.cos(theta) * tail, y - Math.sin(theta) * tail);
-          renderCtx.quadraticCurveTo(
-            x + Math.cos(theta + Math.PI / 2) * orbit * 0.45,
-            y + Math.sin(theta + Math.PI / 2) * orbit * 0.45,
-            x + Math.cos(theta) * tail * 0.45,
-            y + Math.sin(theta) * tail * 0.45
-          );
-          renderCtx.stroke();
+    function ensureWindOverlay() {
+      if (windOverlayCanvas || !map) return;
+      const c = document.createElement('canvas');
+      c.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2;';
+      map.getContainer().appendChild(c);
+      windOverlayCanvas = c;
+      windOverlayCtx = c.getContext('2d');
+      resizeWindOverlay();
+      window.addEventListener('resize', () => { resizeWindOverlay(); redrawWindOverlay(); });
+      map.on('move', redrawWindOverlay);
+      map.on('zoom', redrawWindOverlay);
+      map.on('rotate', redrawWindOverlay);
+      map.on('resize', () => { resizeWindOverlay(); redrawWindOverlay(); });
+    }
 
-          renderCtx.fillStyle = `hsla(${(hue + 28) % 360}, 100%, 90%, ${Math.min(1, alpha + 0.12)})`;
-          renderCtx.beginPath();
-          renderCtx.arc(
-            x + Math.cos(theta) * (tail * 0.58),
-            y + Math.sin(theta) * (tail * 0.58),
-            Math.max(1.2, 1.4 * ss),
-            0,
-            Math.PI * 2
-          );
-          renderCtx.fill();
+    function resizeWindOverlay() {
+      if (!windOverlayCanvas) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const cont = map.getContainer();
+      const w = cont.clientWidth;
+      const h = cont.clientHeight;
+      windOverlayCanvas.width = Math.max(1, Math.floor(w * dpr));
+      windOverlayCanvas.height = Math.max(1, Math.floor(h * dpr));
+      windOverlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function clearWindOverlay() {
+      if (!windOverlayCtx || !windOverlayCanvas) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      windOverlayCtx.clearRect(0, 0, windOverlayCanvas.width / dpr, windOverlayCanvas.height / dpr);
+    }
+
+    function computeWindStreamlines() {
+      windStreamlines = null;
+      if (!isWindCompositeParam() || !windUSliceData || !windVSliceData || !sliceBounds) return;
+      const { nLat, nLon, latStart, lonStart } = sliceBounds;
+      const stepBase = currentStep * nLat * nLon;
+      const maxSeeds = isMobile() ? 18 : 28;
+      const seedStride = Math.max(3, Math.ceil(Math.max(nLat, nLon) / maxSeeds));
+      const maxSteps = 64;
+      const stepLen = 0.5;
+      const minSpeed = 0.25;
+      const lines = [];
+      for (let i = Math.floor(seedStride / 2); i < nLat; i += seedStride) {
+        for (let j = Math.floor(seedStride / 2); j < nLon; j += seedStride) {
+          const fi0 = i + 0.5, fj0 = j + 0.5;
+          const u0 = getGridValue(windUSliceData, stepBase, nLon, i, j);
+          const v0 = getGridValue(windVSliceData, stepBase, nLon, i, j);
+          const sp0 = Math.hypot(u0, v0);
+          if (!Number.isFinite(sp0) || sp0 < minSpeed) continue;
+          const back = traceWindStreamSegment(stepBase, nLat, nLon, fi0, fj0, -1, maxSteps, stepLen, minSpeed);
+          const fwd = traceWindStreamSegment(stepBase, nLat, nLon, fi0, fj0, 1, maxSteps, stepLen, minSpeed);
+          back.reverse();
+          const gridPts = [...back, { x: fj0, y: fi0 }, ...fwd];
+          if (gridPts.length < 3) continue;
+          const pts = gridPts.map(p => ({
+            lat: indexToLat(latStart + p.y),
+            lon: indexToLon(lonStart + p.x),
+          }));
+          lines.push({ pts, speed: sp0 });
         }
       }
-      renderCtx.restore();
+      windStreamlines = lines;
+    }
+
+    function redrawWindOverlay() {
+      if (!windOverlayCtx) return;
+      clearWindOverlay();
+      if (!windStreamlines || windStreamlines.length === 0) return;
+
+      const ctx = windOverlayCtx;
+      const bounds = map.getBounds();
+      const minLon = bounds.getWest(), maxLon = bounds.getEast();
+      const minLat = bounds.getSouth(), maxLat = bounds.getNorth();
+      const layerOp = getLayerOpacity();
+
+      // Widen spacing and thin streamlines at low zoom (large scale view).
+      const zoom = map.getZoom();
+      const zoomFactor = Math.max(1, Math.min(3, 3 - (zoom - 2) * 0.25));
+      const baseSpacing = isMobile() ? 70 : 90;
+      const arrowSpacing = baseSpacing * zoomFactor;
+      const arrowSize = isMobile() ? 6.2 : 7.4;
+      // At low zoom, drop a fraction of streamlines to reduce crowding.
+      const keepEvery = zoom < 4 ? 3 : zoom < 5.5 ? 2 : 1;
+
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      for (let li = 0; li < windStreamlines.length; li++) {
+        if (li % keepEvery !== 0) continue;
+        const line = windStreamlines[li];
+        let anyIn = false;
+        for (const p of line.pts) {
+          if (p.lat >= minLat && p.lat <= maxLat && p.lon >= minLon && p.lon <= maxLon) {
+            anyIn = true;
+            break;
+          }
+        }
+        if (!anyIn) continue;
+
+        const screen = line.pts.map(p => map.project([p.lon, p.lat]));
+
+        const alpha = Math.min(0.95, (0.38 + line.speed * 0.035) * (0.5 + 0.5 * layerOp));
+
+        // Dark halo first for legibility on bright imagery basemap.
+        const lineAlpha = alpha * 0.65;
+        ctx.strokeStyle = `rgba(8,14,28,${Math.min(0.45, lineAlpha * 0.65)})`;
+        ctx.lineWidth = 2.6;
+        ctx.beginPath();
+        ctx.moveTo(screen[0].x, screen[0].y);
+        for (let k = 1; k < screen.length; k++) ctx.lineTo(screen[k].x, screen[k].y);
+        ctx.stroke();
+
+        ctx.strokeStyle = `rgba(240,248,255,${lineAlpha})`;
+        ctx.lineWidth = 1.15;
+        ctx.beginPath();
+        ctx.moveTo(screen[0].x, screen[0].y);
+        for (let k = 1; k < screen.length; k++) ctx.lineTo(screen[k].x, screen[k].y);
+        ctx.stroke();
+
+        let arc = 0, nextAt = arrowSpacing;
+        for (let k = 0; k < screen.length - 1; k++) {
+          const a = screen[k], b = screen[k + 1];
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const segLen = Math.hypot(dx, dy);
+          if (segLen < 1e-6) continue;
+          const ang = Math.atan2(dy, dx);
+          while (arc + segLen >= nextAt) {
+            const t = (nextAt - arc) / segLen;
+            const ax = a.x + dx * t;
+            const ay = a.y + dy * t;
+            drawMicroArrowOnStream(ctx, ax, ay, ang, arrowSize, Math.min(1, alpha + 0.15));
+            nextAt += arrowSpacing;
+          }
+          arc += segLen;
+        }
+      }
+      ctx.restore();
     }
 
     // =======================================================================
