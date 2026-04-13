@@ -42,6 +42,47 @@
   <style>
     /* Hide MapLibre attribution clutter for cleaner look */
     .maplibregl-ctrl-attrib { display: none !important; }
+    :root {
+      --top-ui-gap-mobile: 0.5rem;
+      --top-ui-gap-desktop: 1rem;
+      --compass-size-mobile: 40px;
+      --compass-size-desktop: 44px;
+      --top-row-gap-mobile: 0.5rem;
+      --top-row-gap-desktop: 0.75rem;
+    }
+    /* North arrow / compass control styled like glass panels */
+    .maplibregl-ctrl-top-right {
+      top: var(--top-ui-gap-mobile);
+      right: var(--top-ui-gap-mobile);
+    }
+    .maplibregl-ctrl-top-right .maplibregl-ctrl-group {
+      background: rgba(0, 0, 0, 0.45);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 1rem;
+      box-shadow: 0 20px 25px -5px rgba(0,0,0,0.35), 0 8px 10px -6px rgba(0,0,0,0.35);
+      overflow: hidden;
+    }
+    .maplibregl-ctrl-top-right .maplibregl-ctrl-compass {
+      width: var(--compass-size-mobile);
+      height: var(--compass-size-mobile);
+      color: rgba(255,255,255,0.78);
+    }
+    .maplibregl-ctrl-top-right .maplibregl-ctrl-compass:hover {
+      color: rgba(255,255,255,1);
+      background: rgba(255,255,255,0.08);
+    }
+    @media (min-width: 640px) {
+      .maplibregl-ctrl-top-right {
+        top: var(--top-ui-gap-desktop);
+        right: var(--top-ui-gap-desktop);
+      }
+      .maplibregl-ctrl-top-right .maplibregl-ctrl-compass {
+        width: var(--compass-size-desktop);
+        height: var(--compass-size-desktop);
+      }
+    }
     /* Glass panels */
     .glass {
       background: rgba(0, 0, 0, 0.45);
@@ -49,8 +90,6 @@
       -webkit-backdrop-filter: blur(20px);
       border: 1px solid rgba(255, 255, 255, 0.08);
     }
-    /* Canvas overlay must not capture pointer events except when hovering data */
-    #data-canvas { pointer-events: none; image-rendering: pixelated; }
     /* Timeline slider styling */
     input[type="range"] { -webkit-appearance: none; background: transparent; }
     input[type="range"]::-webkit-slider-runnable-track {
@@ -89,9 +128,6 @@
 
   <!-- ====== Map (full viewport) ====== -->
   <div id="map" class="absolute inset-0 z-0"></div>
-
-  <!-- ====== Canvas overlay (synced to map) ====== -->
-  <canvas id="data-canvas" class="absolute inset-0 z-10"></canvas>
 
   <!-- ====== Mobile drawing overlay (shown only while drawing on mobile) ====== -->
   <div id="drawing-overlay" class="sm:hidden hidden absolute inset-x-0 top-0 z-50 flex flex-col items-center gap-2 pt-3 px-4 pointer-events-none">
@@ -225,13 +261,13 @@
   </div>
 
   <!-- ====== Clock / Timestamp (top-right) ====== -->
-  <div id="clock" class="glass absolute top-2 right-2 sm:top-4 sm:right-4 z-30 rounded-2xl px-3 py-2 sm:px-5 sm:py-3 text-right shadow-2xl hidden max-w-[45vw]">
+  <div id="clock" class="glass absolute top-2 right-[calc(var(--top-ui-gap-mobile)+var(--compass-size-mobile)+var(--top-row-gap-mobile))] sm:top-4 sm:right-[calc(var(--top-ui-gap-desktop)+var(--compass-size-desktop)+var(--top-row-gap-desktop))] z-30 rounded-2xl px-3 py-2 sm:px-5 sm:py-3 text-right shadow-2xl hidden max-w-[45vw]">
     <div id="clock-time" class="text-sm sm:text-lg font-semibold tracking-tight truncate"></div>
     <div id="clock-meta" class="text-xs text-white/50 font-mono mt-0.5"></div>
   </div>
 
   <!-- ====== Color Legend (right side) ====== -->
-  <div id="legend" class="glass absolute top-20 sm:top-24 right-2 sm:right-4 z-30 rounded-2xl p-2 sm:p-3 w-12 sm:w-16 hidden shadow-2xl">
+  <div id="legend" class="glass absolute top-[4.75rem] sm:top-[6rem] right-2 sm:right-4 z-30 rounded-2xl p-2 sm:p-3 w-12 sm:w-16 hidden shadow-2xl">
     <canvas id="legend-canvas" width="24" height="200" class="mx-auto rounded"></canvas>
     <div id="legend-max" class="text-[10px] text-white/60 text-center mt-1 font-mono"></div>
     <div id="legend-min" class="text-[10px] text-white/60 text-center mt-auto font-mono"></div>
@@ -405,7 +441,11 @@
     let dataMin = 0, dataMax = 1;
     let autoDataMin = 0, autoDataMax = 1; // auto-computed from data
     let currentRamp = 'auto';             // 'auto' picks per-param default
-    let map, draw, canvas, ctx;
+    const DATA_LAYER_ID = 'data-overlay-layer';
+    const DATA_SOURCE_ID = 'data-overlay-source';
+    let map, draw;
+    let renderCanvas = null;
+    let renderCtx = null;
     let panelVisible = false; // mobile panel state (desktop always visible via sm:block)
     function isMobile() { return window.innerWidth < 640; }
 
@@ -885,7 +925,15 @@
         attributionControl: false,
       });
 
-      map.on('move', renderFrame);
+      // Compass reset control — auto-hidden by MapLibre when bearing=0 & pitch=0
+      map.addControl(
+        new maplibregl.NavigationControl({
+          showCompass: true,
+          showZoom: false,
+          visualizePitch: true,
+        }),
+        'top-right'
+      );
 
       map.once('load', () => {
         mapInitialLoadDone = true;
@@ -893,11 +941,9 @@
         bindDrawEvents();
       });
 
-      // Canvas setup
-      canvas = document.getElementById('data-canvas');
-      ctx = canvas.getContext('2d');
-      resizeCanvas();
-      window.addEventListener('resize', resizeCanvas);
+      // Offscreen canvas for value->color mapping; MapLibre renders it via ImageSource.
+      renderCanvas = document.createElement('canvas');
+      renderCtx = renderCanvas.getContext('2d');
 
       const opacityEl = document.getElementById('layer-opacity');
       if (opacityEl) {
@@ -1027,10 +1073,10 @@
       updateBasemapToggleUI();
     }
 
-    function resizeCanvas() {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-      if (sliceData) renderFrame();
+    function clearDataOverlay() {
+      if (!map) return;
+      if (map.getLayer(DATA_LAYER_ID)) map.removeLayer(DATA_LAYER_ID);
+      if (map.getSource(DATA_SOURCE_ID)) map.removeSource(DATA_SOURCE_ID);
     }
 
     // =======================================================================
@@ -1337,7 +1383,7 @@
       return { x: pA.x + t * (pB.x - pA.x), y: pA.y + t * (pB.y - pA.y) };
     }
 
-    function drawContoursOverlay(stepBase, nLat, nLon, latStart, lonStart) {
+    function drawContoursOverlay(stepBase, nLat, nLon, ss) {
       const nlev = 7;
       const levels = [];
       const span = dataMax - dataMin;
@@ -1347,25 +1393,24 @@
         levels.push(dataMin + (span * k) / nlev);
       }
 
-      ctx.save();
-      ctx.strokeStyle = 'rgba(255,255,255,0.45)';
-      ctx.lineWidth = 1;
-      ctx.lineJoin = 'round';
+      renderCtx.save();
+      renderCtx.strokeStyle = 'rgba(255,255,255,0.45)';
+      renderCtx.lineWidth = 1;
+      renderCtx.lineJoin = 'round';
 
       const gv = (ii, jj) => {
         const raw = sliceData[stepBase + ii * nLon + jj];
         if (isNaN(raw)) return NaN;
         return paramCfg().convert(raw);
       };
-      const pj = (ii, jj) =>
-        map.project([indexToLon(lonStart + jj), indexToLat(latStart + ii)]);
+      const pj = (ii, jj) => ({ x: jj * ss, y: ii * ss });
 
       let stride = 1;
       if (nLat * nLon > 12000) stride = 2;
       if (nLat * nLon > 48000) stride = 3;
 
       for (const L of levels) {
-        ctx.beginPath();
+        renderCtx.beginPath();
         for (let i = 0; i < nLat - stride; i += stride) {
           for (let j = 0; j < nLon - stride; j += stride) {
             const v00 = gv(i, j);
@@ -1395,24 +1440,22 @@
               const pa = edges[ea];
               const pb = edges[eb];
               if (pa && pb) {
-                ctx.moveTo(pa.x, pa.y);
-                ctx.lineTo(pb.x, pb.y);
+                renderCtx.moveTo(pa.x, pa.y);
+                renderCtx.lineTo(pb.x, pb.y);
               }
             }
           }
         }
-        ctx.stroke();
+        renderCtx.stroke();
       }
-      ctx.restore();
+      renderCtx.restore();
     }
 
     // =======================================================================
     // Canvas Rendering
     // =======================================================================
     function renderFrame() {
-      if (!sliceData || !sliceBounds || !ctx) return;
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (!sliceData || !sliceBounds || !renderCtx || !renderCanvas || !map) return;
 
       const { nLat, nLon, latStart, lonStart } = sliceBounds;
       const stepBase = currentStep * nLat * nLon;
@@ -1422,6 +1465,8 @@
       const imgW = (nLon - 1) * ss + 1;
       const imgH = (nLat - 1) * ss + 1;
 
+      renderCanvas.width = imgW;
+      renderCanvas.height = imgH;
       const imgData = new ImageData(imgW, imgH);
       const pixels = imgData.data;
 
@@ -1442,25 +1487,41 @@
         }
       }
 
-      const nw = map.project([indexToLon(lonStart), indexToLat(latStart)]);
-      const se = map.project([indexToLon(lonStart + nLon), indexToLat(latStart + nLat)]);
-
-      const screenW = se.x - nw.x;
-      const screenH = se.y - nw.y;
-
-      if (screenW <= 0 || screenH <= 0) return;
-
-      const offscreen = new OffscreenCanvas(imgW, imgH);
-      const offCtx = offscreen.getContext('2d');
-      offCtx.putImageData(imgData, 0, 0);
-
-      ctx.imageSmoothingEnabled = smooth;
-      ctx.imageSmoothingQuality = smooth ? 'high' : 'low';
-      ctx.drawImage(offscreen, nw.x, nw.y, screenW, screenH);
+      renderCtx.putImageData(imgData, 0, 0);
 
       if (wantContours()) {
-        drawContoursOverlay(stepBase, nLat, nLon, latStart, lonStart);
+        drawContoursOverlay(stepBase, nLat, nLon, ss);
       }
+
+      const coordinates = [
+        [indexToLon(lonStart), indexToLat(latStart)],
+        [indexToLon(lonStart + nLon), indexToLat(latStart)],
+        [indexToLon(lonStart + nLon), indexToLat(latStart + nLat)],
+        [indexToLon(lonStart), indexToLat(latStart + nLat)],
+      ];
+
+      const imageUrl = renderCanvas.toDataURL('image/png');
+      const src = map.getSource(DATA_SOURCE_ID);
+      if (src && typeof src.updateImage === 'function') {
+        src.updateImage({ url: imageUrl, coordinates });
+      } else {
+        map.addSource(DATA_SOURCE_ID, {
+          type: 'image',
+          url: imageUrl,
+          coordinates,
+        });
+        map.addLayer({
+          id: DATA_LAYER_ID,
+          type: 'raster',
+          source: DATA_SOURCE_ID,
+          paint: {
+            'raster-resampling': smooth ? 'linear' : 'nearest',
+          },
+        });
+      }
+
+      map.setPaintProperty(DATA_LAYER_ID, 'raster-opacity', getLayerOpacity());
+      map.setPaintProperty(DATA_LAYER_ID, 'raster-resampling', smooth ? 'linear' : 'nearest');
     }
 
     // =======================================================================
@@ -1567,7 +1628,7 @@
       // If we have bounds, re-fetch with new param
       if (sliceBounds) {
         sliceData = null;
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        clearDataOverlay();
         document.getElementById('loading').classList.remove('hidden');
 
         fetchSlice(param, sliceBounds.latStart, sliceBounds.latEnd, sliceBounds.lonStart, sliceBounds.lonEnd)
