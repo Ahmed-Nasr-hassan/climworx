@@ -78,14 +78,20 @@ BUCKET = "icon-global-databank"
 
 # Physical plausibility bounds per parameter (min, max)
 PARAM_BOUNDS: dict[str, tuple[float, float]] = {
-    "t_2m":      (180.0, 340.0),   # K
-    "tot_prec":  (0.0, 4000.0),    # mm (global multi-day accumulation)
-    "u_10m":     (-150.0, 150.0),  # m/s
-    "v_10m":     (-150.0, 150.0),  # m/s
-    "pmsl":      (85000.0, 108000.0),  # Pa
-    "clct":      (0.0, 100.0),     # %
-    "relhum_2m": (0.0, 110.0),     # % (allow slight super-saturation)
-    "aswdir_s":  (0.0, 1500.0),    # W/m²
+    "t_2m":      (180.0, 340.0),        # K
+    "tot_prec":  (0.0, 4000.0),         # mm (global multi-day accumulation)
+    "u_10m":     (-150.0, 150.0),       # m/s
+    "v_10m":     (-150.0, 150.0),       # m/s
+    "pmsl":      (85000.0, 108000.0),   # Pa
+    "clct":      (0.0, 100.0),          # %
+    "relhum_2m": (0.0, 110.0),          # % (allow slight super-saturation)
+    "aswdir_s":  (0.0, 1500.0),         # W/m²
+    "td_2m":     (180.0, 320.0),        # K (dew point, always ≤ t_2m)
+    "vmax_10m":  (0.0, 120.0),          # m/s (wind gust)
+    "asob_s":    (-200.0, 1400.0),      # W/m² (net shortwave; negative at night)
+    "alhfl_s":   (-600.0, 800.0),       # W/m² (latent heat flux)
+    "runoff_s":  (0.0, 500.0),          # kg/m² (surface runoff, accumulated)
+    "runoff_g":  (0.0, 500.0),          # kg/m² (subsurface/groundwater runoff, accumulated)
 }
 
 
@@ -269,10 +275,16 @@ def try_stream_download(url: str) -> bytes | None:
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 # Production: parameter-specific CDO weights (conservative for flux/accum fields).
 WEIGHTS_MAP: dict[str, str] = {
+    # Accumulated / flux fields → conservative remapping
     "tot_prec": "weights_conservative.nc",
     "aswdir_s": "weights_conservative.nc",
-    "clct": "weights_conservative.nc",
-    # t_2m, u_10m, v_10m, pmsl, relhum_2m → weights_distance.nc (default)
+    "asob_s":   "weights_conservative.nc",
+    "alhfl_s":  "weights_conservative.nc",
+    "runoff_s": "weights_conservative.nc",
+    "runoff_g": "weights_conservative.nc",
+    "clct":     "weights_conservative.nc",
+    # Instantaneous fields → distance-weighted (default):
+    # t_2m, td_2m, u_10m, v_10m, vmax_10m, pmsl, relhum_2m
 }
 
 

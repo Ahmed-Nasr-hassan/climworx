@@ -355,11 +355,29 @@
     /** True after first style `load`; prevents basemap switch racing initial load / double Draw. */
     let mapInitialLoadDone = false;
     // ── Parameter registry ────────────────────────────────────────────────────
-    // To add a new parameter: push an entry here. The dropdown is built from this.
+    // Each entry drives the dropdown, color ramp, unit conversion, tooltip, and sparkline.
+    // convert: raw Zarr float → display value; decimals: tooltip precision.
     const PARAMS_CONFIG = [
-      { key: 't_2m',     label: 'Temperature',   accent: 'text-orange-300' },
-      { key: 'tot_prec', label: 'Precipitation',  accent: 'text-blue-300'  },
+      { key: 't_2m',      label: 'Temperature 2m',   accent: 'text-orange-300', ramp: 'turbo',    unit: '°C',   decimals: 1, convert: v => v - 273.15, zeroTransparent: false, sparkColor: '#fb923c' },
+      { key: 'tot_prec',  label: 'Precipitation',     accent: 'text-blue-300',   ramp: 'ylgnbu',   unit: 'mm',   decimals: 2, convert: v => v,          zeroTransparent: true,  sparkColor: '#60a5fa' },
+      { key: 'u_10m',     label: 'Wind U 10m',        accent: 'text-purple-300', ramp: 'rdylbu',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#a78bfa' },
+      { key: 'v_10m',     label: 'Wind V 10m',        accent: 'text-purple-300', ramp: 'rdylbu',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#c4b5fd' },
+      { key: 'pmsl',      label: 'Pressure MSL',      accent: 'text-green-300',  ramp: 'spectral', unit: 'hPa',  decimals: 1, convert: v => v / 100,    zeroTransparent: false, sparkColor: '#34d399' },
+      { key: 'clct',      label: 'Cloud Cover',       accent: 'text-sky-300',    ramp: 'blues',    unit: '%',    decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#93c5fd' },
+      { key: 'relhum_2m', label: 'Rel. Humidity 2m',  accent: 'text-cyan-300',   ramp: 'blues',    unit: '%',    decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#7dd3fc' },
+      { key: 'aswdir_s',  label: 'Solar Radiation',   accent: 'text-yellow-300', ramp: 'warm',     unit: 'W/m²', decimals: 0, convert: v => v,          zeroTransparent: false, sparkColor: '#fbbf24' },
+      { key: 'td_2m',     label: 'Dew Point 2m',      accent: 'text-teal-300',   ramp: 'cool',     unit: '°C',   decimals: 1, convert: v => v - 273.15, zeroTransparent: false, sparkColor: '#2dd4bf' },
+      { key: 'vmax_10m',  label: 'Wind Gust 10m',     accent: 'text-rose-300',   ramp: 'plasma',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#fb7185' },
+      { key: 'asob_s',    label: 'Net SW Radiation',  accent: 'text-amber-300',  ramp: 'warm',     unit: 'W/m²', decimals: 0, convert: v => v,          zeroTransparent: false, sparkColor: '#f59e0b' },
+      { key: 'alhfl_s',   label: 'Latent Heat Flux',  accent: 'text-lime-300',   ramp: 'rdylbu',   unit: 'W/m²', decimals: 0, convert: v => v,          zeroTransparent: false, sparkColor: '#a3e635' },
+      { key: 'runoff_s',  label: 'Surface Runoff',    accent: 'text-blue-400',   ramp: 'blues',    unit: 'kg/m²',decimals: 2, convert: v => v,          zeroTransparent: true,  sparkColor: '#38bdf8' },
+      { key: 'runoff_g',  label: 'Subsurface Runoff', accent: 'text-indigo-300', ramp: 'blues',    unit: 'kg/m²',decimals: 2, convert: v => v,          zeroTransparent: true,  sparkColor: '#818cf8' },
     ];
+
+    /** Returns the config entry for the currently selected parameter. */
+    function paramCfg() {
+      return PARAMS_CONFIG.find(p => p.key === currentParam) || PARAMS_CONFIG[0];
+    }
 
     let currentParam = 't_2m';
     let spatialIndex = null;      // from spatial_index.json
@@ -1127,7 +1145,7 @@
 
     function getInterpolator() {
       if (currentRamp !== 'auto' && RAMP_MAP[currentRamp]) return RAMP_MAP[currentRamp];
-      return currentParam === 't_2m' ? d3.interpolateTurbo : d3.interpolateYlGnBu;
+      return RAMP_MAP[paramCfg().ramp] || d3.interpolateYlGnBu;
     }
 
     function computeColorScale() {
@@ -1137,7 +1155,7 @@
       for (let i = 0; i < sliceData.length; i++) {
         const v = sliceData[i];
         if (!isNaN(v) && isFinite(v)) {
-          const mapped = currentParam === 't_2m' ? v - 273.15 : v;
+          const mapped = paramCfg().convert(v);
           if (mapped < min) min = mapped;
           if (mapped > max) max = mapped;
         }
@@ -1159,7 +1177,7 @@
 
     function rebuildColorScale() {
       const interp = getInterpolator();
-      const domainMin = currentParam === 'tot_prec' ? Math.max(0, dataMin) : dataMin;
+      const domainMin = paramCfg().zeroTransparent ? Math.max(0, dataMin) : dataMin;
       colorScale = d3.scaleSequential(interp).domain([domainMin, dataMax]);
     }
 
@@ -1202,16 +1220,17 @@
     function valueToColor(rawValue) {
       if (isNaN(rawValue)) return [0, 0, 0, 0];
 
-      const v = currentParam === 't_2m' ? rawValue - 273.15 : rawValue;
+      const cfg = paramCfg();
+      const v = cfg.convert(rawValue);
 
-      // Precipitation: transparent for zero/near-zero
-      if (currentParam === 'tot_prec' && v < 0.01) return [0, 0, 0, 0];
+      // Zero-transparent fields (e.g. precipitation): hide near-zero values
+      if (cfg.zeroTransparent && v < 0.01) return [0, 0, 0, 0];
 
       const cssColor = colorScale(v);
       const c = d3.color(cssColor);
       if (!c) return [0, 0, 0, 0];
       const dm = dataMax || 1;
-      const baseA = currentParam === 'tot_prec'
+      const baseA = cfg.zeroTransparent
         ? Math.min(255, Math.round(180 + 75 * (v / dm)))
         : 200;
       return [c.r, c.g, c.b, baseA];
@@ -1296,7 +1315,7 @@
       const gv = (ii, jj) => {
         const raw = sliceData[stepBase + ii * nLon + jj];
         if (isNaN(raw)) return NaN;
-        return currentParam === 't_2m' ? raw - 273.15 : raw;
+        return paramCfg().convert(raw);
       };
       const pj = (ii, jj) =>
         map.project([indexToLon(lonStart + jj), indexToLat(latStart + ii)]);
@@ -1421,9 +1440,9 @@
         lCtx.fillRect(0, y, w, 1);
       }
 
-      const unit = currentParam === 't_2m' ? '°C' : 'mm';
-      document.getElementById('legend-max').textContent = `${dataMax.toFixed(1)}${unit}`;
-      document.getElementById('legend-min').textContent = `${dataMin.toFixed(1)}${unit}`;
+      const { unit, decimals } = paramCfg();
+      document.getElementById('legend-max').textContent = `${dataMax.toFixed(decimals)}${unit}`;
+      document.getElementById('legend-min').textContent = `${dataMin.toFixed(decimals)}${unit}`;
     }
 
     // =======================================================================
@@ -1538,13 +1557,13 @@
 
       const nSteps = stepsArray ? stepsArray.length : 93;
       const val = sliceData[currentStep * nLat * nLon + gi * nLon + gj];
-      const displayVal = currentParam === 't_2m' ? (val - 273.15).toFixed(1) + ' °C' : val.toFixed(2) + ' mm';
-      const unit = currentParam === 't_2m' ? '°C' : 'mm';
+      const { unit, decimals, convert, sparkColor } = paramCfg();
+      const displayVal = isNaN(val) ? 'No data' : `${convert(val).toFixed(decimals)} ${unit}`;
 
       const latLabel = lat >= 0 ? `${lat.toFixed(3)}°N` : `${(-lat).toFixed(3)}°S`;
       const lonLabel = lon >= 0 ? `${lon.toFixed(3)}°E` : `${(-lon).toFixed(3)}°W`;
       document.getElementById('tooltip-coords').textContent = `${latLabel}, ${lonLabel}`;
-      document.getElementById('tooltip-value').textContent = isNaN(val) ? 'No data' : displayVal;
+      document.getElementById('tooltip-value').textContent = displayVal;
 
       // Sparkline: time series for this pixel
       const sparkCanvas = document.getElementById('tooltip-spark');
@@ -1557,15 +1576,14 @@
       }
 
       let sMin = Infinity, sMax = -Infinity;
-      for (const v of series) { if (!isNaN(v)) { if (v < sMin) sMin = v; if (v > sMax) sMax = v; } }
-      if (currentParam === 't_2m') { sMin -= 273.15; sMax -= 273.15; }
+      for (const v of series) { const cv = convert(v); if (!isNaN(cv)) { if (cv < sMin) sMin = cv; if (cv > sMax) sMax = cv; } }
 
       const range = sMax - sMin || 1;
-      sCtx.strokeStyle = currentParam === 't_2m' ? '#fb923c' : '#60a5fa';
+      sCtx.strokeStyle = sparkColor;
       sCtx.lineWidth = 1.5;
       sCtx.beginPath();
       for (let s = 0; s < nSteps; s++) {
-        const v = currentParam === 't_2m' ? series[s] - 273.15 : series[s];
+        const v = convert(series[s]);
         const x = (s / (nSteps - 1)) * sparkCanvas.width;
         const y = sparkCanvas.height - ((v - sMin) / range) * (sparkCanvas.height - 4) - 2;
         s === 0 ? sCtx.moveTo(x, y) : sCtx.lineTo(x, y);
@@ -1574,7 +1592,7 @@
 
       // Draw current step marker
       const cx = (currentStep / (nSteps - 1)) * sparkCanvas.width;
-      const cv = currentParam === 't_2m' ? series[currentStep] - 273.15 : series[currentStep];
+      const cv = convert(series[currentStep]);
       const cy = sparkCanvas.height - ((cv - sMin) / range) * (sparkCanvas.height - 4) - 2;
       sCtx.fillStyle = 'white';
       sCtx.beginPath();
