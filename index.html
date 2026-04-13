@@ -321,32 +321,9 @@
     const BASEMAP_DARK_URL =
       'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 
-    /** Esri World Topo (XYZ raster) — contour lines, terrain shading, place labels. */
-    const BASEMAP_TOPO_STYLE = {
-      version: 8,
-      name: 'World Topo',
-      glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
-      sources: {
-        esri_topo: {
-          type: 'raster',
-          tiles: [
-            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
-          ],
-          tileSize: 256,
-          attribution: '<a href="https://www.esri.com/" target="_blank" rel="noopener">Esri</a>',
-          maxzoom: 19,
-        },
-      },
-      layers: [
-        {
-          id: 'esri_world_topo',
-          type: 'raster',
-          source: 'esri_topo',
-          minzoom: 0,
-          maxzoom: 22,
-        },
-      ],
-    };
+    /** Carto Voyager GL (vector) — detailed light map; patchable for Palestine labels. */
+    const BASEMAP_TOPO_URL =
+      'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
 
     /** Esri World Imagery (XYZ raster) — no API key; attribution required for display. */
     const BASEMAP_IMAGERY_STYLE = {
@@ -670,13 +647,15 @@
       if (attrib) {
         attrib.classList.toggle('hidden', mode === 'dark');
         if (mode === 'imagery') attrib.textContent = 'Imagery © Esri, Maxar, Earthstar Geographics';
-        if (mode === 'topo')    attrib.textContent = 'Topo © Esri';
+        if (mode === 'topo')    attrib.textContent = '© CARTO Voyager';
       }
     }
 
     let PATCHED_DARK_STYLE = null;
+    let PATCHED_TOPO_STYLE = null;
     /** In-flight fetch+patch; reused so prefetch and switchBasemap share one request. */
     let darkStyleLoadPromise = null;
+    let topoStyleLoadPromise  = null;
 
     /**
      * Fetches and patches the Carto dark style once. Safe to call early (prefetch) or from switchBasemap.
@@ -706,6 +685,27 @@
           });
       }
       return darkStyleLoadPromise;
+    }
+
+    function ensurePatchedTopoStyle() {
+      if (PATCHED_TOPO_STYLE) return Promise.resolve(PATCHED_TOPO_STYLE);
+      if (!topoStyleLoadPromise) {
+        topoStyleLoadPromise = fetch(BASEMAP_TOPO_URL).then((r) => r.json())
+          .then((json) => {
+            const copy =
+              typeof structuredClone === 'function'
+                ? structuredClone(json)
+                : JSON.parse(JSON.stringify(json));
+            PATCHED_TOPO_STYLE = patchStyleJson(copy);
+            return PATCHED_TOPO_STYLE;
+          })
+          .catch((e) => {
+            console.error('Failed to load topo style', e);
+            topoStyleLoadPromise = null;
+            return null;
+          });
+      }
+      return topoStyleLoadPromise;
     }
 
     /**
@@ -811,7 +811,8 @@
       if (mode === 'imagery') {
         style = BASEMAP_IMAGERY_STYLE;
       } else if (mode === 'topo') {
-        style = BASEMAP_TOPO_STYLE;
+        const loaded = await ensurePatchedTopoStyle();
+        style = loaded || BASEMAP_TOPO_URL;
       } else {
         const loaded = await ensurePatchedDarkStyle();
         style = loaded || BASEMAP_DARK_URL;

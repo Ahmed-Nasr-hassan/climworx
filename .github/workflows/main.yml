@@ -72,6 +72,23 @@ jobs:
             RUN_DATE=$(date -u +%Y%m%d)
           fi
 
+          # Probe DWD once to lock onto a run that is actually published.
+          # All matrix jobs reuse this value so late-starting jobs (queued by
+          # max-parallel) never drift to a newer run than their siblings.
+          for i in 0 1 2 3; do
+            CAND=$(date -u -d "$RUN_DATE ${MODEL_RUN}:00:00 UTC - $((i*6)) hours" +%Y%m%d%H)
+            HH=${CAND:8:2}
+            URL="https://opendata.dwd.de/weather/nwp/icon/grib/${HH}/t_2m/icon_global_icosahedral_single-level_${CAND}_000_T_2M.grib2.bz2"
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 --retry 2 -I "$URL" || echo "000")
+            if [ "$CODE" = "200" ]; then
+              RUN_DATE=${CAND:0:8}
+              MODEL_RUN=$HH
+              echo "DWD has run $CAND (probe #$i)"
+              break
+            fi
+            echo "Run $CAND not on DWD yet (HTTP $CODE)"
+          done
+
           echo "MODEL_RUN=$MODEL_RUN" >> "$GITHUB_OUTPUT"
           echo "RUN_DATE=$RUN_DATE"   >> "$GITHUB_OUTPUT"
           echo "Resolved: MODEL_RUN=$MODEL_RUN  RUN_DATE=$RUN_DATE"
