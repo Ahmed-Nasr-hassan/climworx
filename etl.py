@@ -126,6 +126,13 @@ def make_r2_fs() -> s3fs.S3FileSystem:
         secret=env("R2_SECRET_ACCESS_KEY"),
         endpoint_url=f"https://{env('CF_ACCOUNT_ID')}.r2.cloudflarestorage.com",
         client_kwargs={"region_name": "auto"},
+        # Harden against transient R2 slow responses (notably bulk delete calls
+        # issued during overwrite uploads).
+        config_kwargs={
+            "connect_timeout": 30,
+            "read_timeout": 300,
+            "retries": {"max_attempts": 10, "mode": "adaptive"},
+        },
     )
 
 
@@ -521,7 +528,11 @@ def upload_to_staging(
     store = s3fs.S3Map(root=staging_path, s3=fs, check=False)
 
     log.info("Uploading %s → s3://%s …", param, staging_path)
-    ds.to_zarr(store, mode="w", consolidated=True, encoding=encoding, zarr_format=2)
+
+    def _write_zarr():
+        ds.to_zarr(store, mode="w", consolidated=True, encoding=encoding, zarr_format=2)
+
+    with_retry(_write_zarr, label=f"upload/{param}")
 
     # Write _SUCCESS marker for this parameter
     marker_key = f"{staging_path}/_SUCCESS"
