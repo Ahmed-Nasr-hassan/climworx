@@ -316,7 +316,7 @@
     const LON_MIN = -180.0;
     const NY = 1441;
     const NX = 2879;
-    const MAX_PIXELS = 50000;
+    const MAX_PIXELS = 150000;
 
     const BASEMAP_DARK_URL =
       'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
@@ -1109,7 +1109,7 @@
       const totalPixels = nLat * nLon;
 
       if (totalPixels > MAX_PIXELS) {
-        showToast(`Selected area is too large (${totalPixels.toLocaleString()} pixels). Draw a smaller region (max ~220×220).`, 'error');
+        showToast(`Selected area is too large (${totalPixels.toLocaleString()} pixels). Draw a smaller region (max ~390×390).`, 'error');
         draw.deleteAll();
         setDrawAreaToggleUi(false);
         return;

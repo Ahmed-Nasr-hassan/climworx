@@ -102,7 +102,7 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
-      max-parallel: 4
+      max-parallel: 5
       matrix:
         parameter:
           - t_2m
