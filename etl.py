@@ -548,6 +548,114 @@ def upload_to_staging(
 # ---------------------------------------------------------------------------
 
 
+class ParamValidationError(ValueError):
+    """Validation failed for one ETL parameter; ``.param`` names the failing key."""
+
+    def __init__(self, param: str, message: str) -> None:
+        super().__init__(message)
+        self.param = param
+
+
+def validate_one_param(
+    run_dt: str,
+    param: str,
+    ensemble: bool,
+    fs: s3fs.S3FileSystem,
+    all_steps: list[int],
+) -> None:
+    """
+    Validate one staged parameter.
+    Raises ParamValidationError with ``.param`` set so callers can retry from that index only.
+    """
+    staging_path = f"{BUCKET}/staging/{run_dt}/{param}"
+
+    # 1. _SUCCESS marker — fail fast if staging upload was interrupted
+    marker = f"{staging_path}/_SUCCESS"
+    if not fs.exists(marker):
+        raise ParamValidationError(
+            param,
+            f"[{param}] _SUCCESS marker missing at {marker} — "
+            "staging upload likely incomplete or ETL job failed",
+        )
+
+    store = s3fs.S3Map(root=staging_path, s3=fs, check=False)
+
+    # 2. Zarr store readable (consolidated metadata)
+    try:
+        ds = xr.open_zarr(store, consolidated=True)
+    except Exception as exc:
+        raise ParamValidationError(param, f"[{param}] Cannot open Zarr store: {exc}") from exc
+
+    # 2. Step completeness
+    if "step" not in ds.coords:
+        raise ParamValidationError(param, f"[{param}] 'step' coordinate not found in Zarr store")
+    actual_steps = set(int(s) for s in ds.coords["step"].values)
+    expected_steps = set(all_steps)
+    unexpected = actual_steps - expected_steps
+    if unexpected:
+        raise ParamValidationError(
+            param,
+            f"[{param}] Zarr contains steps not in catalog for this run: "
+            f"{sorted(unexpected)[:15]}{'…' if len(unexpected) > 15 else ''}",
+        )
+    missing = expected_steps - actual_steps
+    if missing:
+        missing_fraction = len(missing) / len(expected_steps)
+        if missing_fraction > MAX_MISSING_STEP_FRACTION:
+            raise ParamValidationError(
+                param,
+                f"[{param}] Too many forecast steps missing: "
+                f"{len(missing)}/{len(expected_steps)} "
+                f"({missing_fraction:.0%}) — DWD upload likely incomplete. "
+                f"Missing: {sorted(missing)[:10]}{'…' if len(missing) > 10 else ''}",
+            )
+        log.warning(
+            "[%s] %d/%d forecast steps absent from Zarr (skipped on DWD): %s%s",
+            param,
+            len(missing),
+            len(expected_steps),
+            sorted(missing)[:15],
+            "…" if len(missing) > 15 else "",
+        )
+
+    # 3. Non-empty arrays + plausibility bounds
+    #    Use dask-aware operations to avoid loading entire arrays into RAM
+    #    (a single parameter can be ~1.6 GB as float32).
+    bounds = PARAM_BOUNDS.get(param)
+    for var in ds.data_vars:
+        if ds[var].size == 0:
+            raise ParamValidationError(param, f"[{param}/{var}] Data array is empty")
+        if bool(ds[var].isnull().all().compute()):
+            raise ParamValidationError(param, f"[{param}/{var}] All-NaN array")
+        if bounds is not None:
+            vmin = float(ds[var].min().compute())
+            vmax = float(ds[var].max().compute())
+            if vmin < bounds[0] or vmax > bounds[1]:
+                raise ParamValidationError(
+                    param,
+                    f"[{param}/{var}] Values out of plausible range "
+                    f"[{bounds[0]}, {bounds[1]}]: got [{vmin:.2f}, {vmax:.2f}]",
+                )
+
+    # 4. Ensemble member count
+    if ensemble:
+        n_members = ds.dims.get("realization", 0)
+        if n_members != ENSEMBLE_MEMBERS:
+            raise ParamValidationError(
+                param,
+                f"[{param}] Expected {ENSEMBLE_MEMBERS} ensemble members, got {n_members}",
+            )
+
+    log.info(
+        "  [OK] %s — %d/%d steps in Zarr, %d data vars%s",
+        param,
+        len(actual_steps),
+        len(all_steps),
+        len(ds.data_vars),
+        f", {ENSEMBLE_MEMBERS} members" if ensemble else "",
+    )
+
+
 def validate_run(
     run_dt: str,
     params: list[str],
@@ -557,95 +665,55 @@ def validate_run(
 ) -> None:
     """
     Validate the complete staged run.
-    Raises ValueError with a descriptive message on any failure.
+    Raises ParamValidationError (or ValueError after selective-retry exhaustion) on failure.
     """
     log.info("=== Validation: run=%s ===", run_dt)
-
     for param in params:
-        staging_path = f"{BUCKET}/staging/{run_dt}/{param}"
-
-        # 1. _SUCCESS marker — fail fast if staging upload was interrupted
-        marker = f"{staging_path}/_SUCCESS"
-        if not fs.exists(marker):
-            raise ValueError(
-                f"[{param}] _SUCCESS marker missing at {marker} — "
-                "staging upload likely incomplete or ETL job failed"
-            )
-
-        store = s3fs.S3Map(root=staging_path, s3=fs, check=False)
-
-        # 2. Zarr store readable (consolidated metadata)
-        try:
-            ds = xr.open_zarr(store, consolidated=True)
-        except Exception as exc:
-            raise ValueError(f"[{param}] Cannot open Zarr store: {exc}") from exc
-
-        # 2. Step completeness
-        if "step" not in ds.coords:
-            raise ValueError(f"[{param}] 'step' coordinate not found in Zarr store")
-        actual_steps = set(int(s) for s in ds.coords["step"].values)
-        expected_steps = set(all_steps)
-        unexpected = actual_steps - expected_steps
-        if unexpected:
-            raise ValueError(
-                f"[{param}] Zarr contains steps not in catalog for this run: "
-                f"{sorted(unexpected)[:15]}{'…' if len(unexpected) > 15 else ''}"
-            )
-        missing = expected_steps - actual_steps
-        if missing:
-            missing_fraction = len(missing) / len(expected_steps)
-            if missing_fraction > MAX_MISSING_STEP_FRACTION:
-                raise ValueError(
-                    f"[{param}] Too many forecast steps missing: "
-                    f"{len(missing)}/{len(expected_steps)} "
-                    f"({missing_fraction:.0%}) — DWD upload likely incomplete. "
-                    f"Missing: {sorted(missing)[:10]}{'…' if len(missing) > 10 else ''}"
-                )
-            log.warning(
-                "[%s] %d/%d forecast steps absent from Zarr (skipped on DWD): %s%s",
-                param,
-                len(missing),
-                len(expected_steps),
-                sorted(missing)[:15],
-                "…" if len(missing) > 15 else "",
-            )
-
-        # 3. Non-empty arrays + plausibility bounds
-        #    Use dask-aware operations to avoid loading entire arrays into RAM
-        #    (a single parameter can be ~1.6 GB as float32).
-        bounds = PARAM_BOUNDS.get(param)
-        for var in ds.data_vars:
-            if ds[var].size == 0:
-                raise ValueError(f"[{param}/{var}] Data array is empty")
-            if bool(ds[var].isnull().all().compute()):
-                raise ValueError(f"[{param}/{var}] All-NaN array")
-            if bounds is not None:
-                vmin = float(ds[var].min().compute())
-                vmax = float(ds[var].max().compute())
-                if vmin < bounds[0] or vmax > bounds[1]:
-                    raise ValueError(
-                        f"[{param}/{var}] Values out of plausible range "
-                        f"[{bounds[0]}, {bounds[1]}]: got [{vmin:.2f}, {vmax:.2f}]"
-                    )
-
-        # 4. Ensemble member count
-        if ensemble:
-            n_members = ds.dims.get("realization", 0)
-            if n_members != ENSEMBLE_MEMBERS:
-                raise ValueError(
-                    f"[{param}] Expected {ENSEMBLE_MEMBERS} ensemble members, got {n_members}"
-                )
-
-        log.info(
-            "  [OK] %s — %d/%d steps in Zarr, %d data vars%s",
-            param,
-            len(actual_steps),
-            len(all_steps),
-            len(ds.data_vars),
-            f", {ENSEMBLE_MEMBERS} members" if ensemble else "",
-        )
-
+        validate_one_param(run_dt, param, ensemble, fs, all_steps)
     log.info("=== Validation PASSED ===")
+
+
+def validate_run_with_selective_retry(
+    run_dt: str,
+    params: list[str],
+    ensemble: bool,
+    fs: s3fs.S3FileSystem,
+    all_steps: list[int],
+) -> None:
+    """
+    Like ``validate_run``, but on failure only re-validates from the failing parameter onward
+    (same backoff as ``with_retry``), avoiding redundant work for parameters that already passed.
+    """
+    log.info("=== Validation: run=%s ===", run_dt)
+    start_idx = 0
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            for i in range(start_idx, len(params)):
+                validate_one_param(run_dt, params[i], ensemble, fs, all_steps)
+            log.info("=== Validation PASSED ===")
+            return
+        except ParamValidationError as exc:
+            try:
+                failed_idx = params.index(exc.param)
+            except ValueError as idx_err:
+                raise ValueError(str(exc)) from idx_err
+            start_idx = failed_idx
+            if attempt >= MAX_RETRIES:
+                log.error("[%s] All %d attempts failed: %s", "validation", MAX_RETRIES, exc)
+                raise ValueError(str(exc)) from exc
+            wait = min(RETRY_BASE_S * (2 ** (attempt - 1)), RETRY_MAX_S)
+            log.warning(
+                "[%s] Attempt %d/%d failed (%s). Retrying from %s in %ds…",
+                "validation",
+                attempt,
+                MAX_RETRIES,
+                exc,
+                params[start_idx],
+                wait,
+            )
+            time.sleep(wait)
 
 
 # ---------------------------------------------------------------------------
@@ -913,14 +981,8 @@ def main() -> None:
             log.warning("No _RESOLVED_RUN marker found; using CI run_dt %s", run_dt)
 
         try:
-            with_retry(
-                validate_run,
-                run_dt,
-                all_params,
-                ensemble,
-                fs,
-                all_steps,
-                label="validation",
+            validate_run_with_selective_retry(
+                run_dt, all_params, ensemble, fs, all_steps
             )
         except Exception as exc:
             msg = f"VALIDATION FAILED | run={run_dt} | error={exc}"
