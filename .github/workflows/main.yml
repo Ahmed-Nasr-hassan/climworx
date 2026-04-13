@@ -94,11 +94,120 @@ jobs:
           echo "Resolved: MODEL_RUN=$MODEL_RUN  RUN_DATE=$RUN_DATE"
 
   # =========================================================================
+  # Job 1a: Build CDO remap assets once (cached across workflow runs).
+  # The native grid + derived weights are static, so cache hit rate is ~100%.
+  # =========================================================================
+  build-assets:
+    name: Build CDO remap assets
+    needs: resolve-run
+    runs-on: ubuntu-latest
+    env:
+      # Bump this when you need to force a rebuild (e.g. new target grid).
+      ASSETS_CACHE_KEY: cdo-remap-assets-v1
+    steps:
+      - name: Restore assets from cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: assets/
+          key: ${{ env.ASSETS_CACHE_KEY }}
+
+      - name: Install CDO
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cdo bzip2
+
+      - name: Build CDO remap assets (DWD native grid → weights)
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          RUN_DATE: ${{ needs.resolve-run.outputs.run_date }}
+        run: |
+          set -euo pipefail
+          ASSETS="${GITHUB_WORKSPACE}/assets"
+          mkdir -p "$ASSETS"
+
+          GRID_URL="https://opendata.dwd.de/weather/lib/cdo/icon_grid_0026_R03B07_G.nc.bz2"
+          echo "::group::Download native grid"
+          curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors \
+               --connect-timeout 30 --max-time 600 \
+               -o /tmp/icon_grid.nc.bz2 "$GRID_URL"
+          bunzip2 -f /tmp/icon_grid.nc.bz2
+          mv /tmp/icon_grid.nc "$ASSETS/icon_grid_R03B07_G.nc"
+          echo "::endgroup::"
+
+          echo "::group::Download sample GRIB2 template"
+          got=0
+          if [ -n "${RUN_DATE:-}" ]; then
+            for hh in 18 12 06 00; do
+              URL="https://opendata.dwd.de/weather/nwp/icon/grib/${hh}/t_2m/icon_global_icosahedral_single-level_${RUN_DATE}${hh}_000_T_2M.grib2.bz2"
+              echo "Trying: $URL"
+              if curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+                      --connect-timeout 30 --max-time 300 \
+                      -o /tmp/sample.grib2.bz2 "$URL"; then
+                got=1; echo "OK: $URL"; break
+              fi
+            done
+          fi
+          if [ "$got" -ne 1 ]; then
+            for days_ago in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+              D=$(date -u -d "$days_ago days ago" +%Y%m%d)
+              for hh in 18 12 06 00; do
+                URL="https://opendata.dwd.de/weather/nwp/icon/grib/${hh}/t_2m/icon_global_icosahedral_single-level_${D}${hh}_000_T_2M.grib2.bz2"
+                echo "Trying: $URL"
+                if curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+                        --connect-timeout 30 --max-time 300 \
+                        -o /tmp/sample.grib2.bz2 "$URL"; then
+                  got=1; echo "OK: $URL"; break 2
+                fi
+              done
+            done
+          fi
+          if [ "$got" -ne 1 ]; then
+            echo "::error::Could not download any t_2m step-0 sample GRIB2 (RUN_DATE + last 15 days × 4 cycles)."
+            exit 1
+          fi
+          bunzip2 -f /tmp/sample.grib2.bz2
+          echo "::endgroup::"
+
+          {
+            echo 'gridtype  = lonlat'
+            echo 'xsize     = 2879'
+            echo 'ysize     = 1441'
+            echo 'xfirst    = -180.0'
+            echo 'xinc      = 0.125'
+            echo 'yfirst    = 90.0'
+            echo 'yinc      = -0.125'
+          } > "$ASSETS/target_grid_world_0125.txt"
+
+          echo "::group::cdo gendis (weights_distance.nc)"
+          cdo -O gendis,"$ASSETS/target_grid_world_0125.txt" \
+            -setgrid,"$ASSETS/icon_grid_R03B07_G.nc" /tmp/sample.grib2 \
+            "$ASSETS/weights_distance.nc"
+          echo "::endgroup::"
+
+          echo "::group::cdo genycon (weights_conservative.nc)"
+          cdo -O genycon,"$ASSETS/target_grid_world_0125.txt" \
+            -setgrid,"$ASSETS/icon_grid_R03B07_G.nc" /tmp/sample.grib2 \
+            "$ASSETS/weights_conservative.nc"
+          echo "::endgroup::"
+
+          rm -f "$ASSETS/icon_grid_R03B07_G.nc" /tmp/sample.grib2
+          ls -la "$ASSETS"
+
+      - name: Upload assets artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdo-remap-assets
+          path: assets/
+          retention-days: 1
+
+  # =========================================================================
   # Job 1: ETL — runs in parallel across all parameters (matrix)
   # =========================================================================
   etl:
     name: "ETL · ${{ matrix.parameter }} · ${{ needs.resolve-run.outputs.model_run }}Z"
-    needs: resolve-run
+    needs: [resolve-run, build-assets]
     runs-on: ubuntu-latest
 
     strategy:
@@ -150,89 +259,11 @@ jobs:
             requests \
             netCDF4
 
-      - name: Build CDO remap assets (DWD native grid → weights)
-        env:
-          RUN_DATE: ${{ needs.resolve-run.outputs.run_date }}
-        run: |
-          set -euo pipefail
-          ASSETS="${GITHUB_WORKSPACE}/assets"
-          mkdir -p "$ASSETS"
-
-          # 1. Download official ICON Global native grid (R03B07 / ~13km)
-          GRID_URL="https://opendata.dwd.de/weather/lib/cdo/icon_grid_0026_R03B07_G.nc.bz2"
-          echo "::group::Download native grid"
-          curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors \
-               --connect-timeout 30 --max-time 600 \
-               -o /tmp/icon_grid.nc.bz2 "$GRID_URL"
-          bunzip2 -f /tmp/icon_grid.nc.bz2
-          mv /tmp/icon_grid.nc "$ASSETS/icon_grid_R03B07_G.nc"
-          echo "::endgroup::"
-
-          # 2. Dynamically scrape DWD to find an existing GRIB2 sample to use as a data template
-          echo "::group::Download sample GRIB2 template"
-          got=0
-          if [ -n "${RUN_DATE:-}" ]; then
-            for hh in 18 12 06 00; do
-              URL="https://opendata.dwd.de/weather/nwp/icon/grib/${hh}/t_2m/icon_global_icosahedral_single-level_${RUN_DATE}${hh}_000_T_2M.grib2.bz2"
-              echo "Trying: $URL"
-              if curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
-                      --connect-timeout 30 --max-time 300 \
-                      -o /tmp/sample.grib2.bz2 "$URL"; then
-                got=1
-                echo "OK: $URL"
-                break
-              fi
-            done
-          fi
-          if [ "$got" -ne 1 ]; then
-            for days_ago in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
-              D=$(date -u -d "$days_ago days ago" +%Y%m%d)
-              for hh in 18 12 06 00; do
-                URL="https://opendata.dwd.de/weather/nwp/icon/grib/${hh}/t_2m/icon_global_icosahedral_single-level_${D}${hh}_000_T_2M.grib2.bz2"
-                echo "Trying: $URL"
-                if curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
-                      --connect-timeout 30 --max-time 300 \
-                      -o /tmp/sample.grib2.bz2 "$URL"; then
-                  got=1
-                  echo "OK: $URL"
-                  break 2
-                fi
-              done
-            done
-          fi
-          if [ "$got" -ne 1 ]; then
-            echo "::error::Could not download any t_2m step-0 sample GRIB2 (RUN_DATE + last 15 days × 4 cycles)."
-            exit 1
-          fi
-          bunzip2 -f /tmp/sample.grib2.bz2
-          echo "::endgroup::"
-
-          # 3. Write target regular grid definition
-          {
-            echo 'gridtype  = lonlat'
-            echo 'xsize     = 2879'
-            echo 'ysize     = 1441'
-            echo 'xfirst    = -180.0'
-            echo 'xinc      = 0.125'
-            echo 'yfirst    = 90.0'
-            echo 'yinc      = -0.125'
-          } > "$ASSETS/target_grid_world_0125.txt"
-
-          # 4. Generate weights by explicitly applying the native grid to the sample GRIB2 dataset
-          echo "::group::cdo gendis (weights_distance.nc)"
-          cdo -O gendis,"$ASSETS/target_grid_world_0125.txt" \
-            -setgrid,"$ASSETS/icon_grid_R03B07_G.nc" /tmp/sample.grib2 \
-            "$ASSETS/weights_distance.nc"
-          echo "::endgroup::"
-
-          echo "::group::cdo genycon (weights_conservative.nc)"
-          cdo -O genycon,"$ASSETS/target_grid_world_0125.txt" \
-            -setgrid,"$ASSETS/icon_grid_R03B07_G.nc" /tmp/sample.grib2 \
-            "$ASSETS/weights_conservative.nc"
-          echo "::endgroup::"
-
-          rm -f "$ASSETS/icon_grid_R03B07_G.nc" /tmp/sample.grib2
-          ls -la "$ASSETS"
+      - name: Download prebuilt CDO remap assets
+        uses: actions/download-artifact@v4
+        with:
+          name: cdo-remap-assets
+          path: assets/
 
       - name: Run ETL (download → regrid → stage)
         env:

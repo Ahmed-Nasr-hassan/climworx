@@ -265,9 +265,13 @@
             <svg id="icon-play" class="w-4 h-4 sm:w-5 sm:h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
             <svg id="icon-pause" class="w-4 h-4 sm:w-5 sm:h-5 hidden" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
           </button>
-          <!-- Timeline -->
-          <div class="flex-1 min-w-0">
-            <input id="timeline" type="range" min="0" max="92" value="0" step="1" class="w-full cursor-pointer" oninput="seekTo(this.value)" />
+          <!-- Timeline (scaled to forecast hours, not step indices) -->
+          <div class="flex-1 min-w-0 relative">
+            <input id="timeline" type="range" min="0" max="180" value="0" step="1" class="w-full cursor-pointer" oninput="seekTo(this.value)" />
+            <!-- Breakpoint tick: marks where 1-hourly steps end and 3-hourly begin -->
+            <div id="timeline-break" title="1h → 3h step interval" class="absolute top-0 bottom-0 flex flex-col items-center pointer-events-none" style="left:0%;transform:translateX(-50%)">
+              <div class="w-px h-2 bg-white/40 mt-0.5"></div>
+            </div>
           </div>
           <!-- Speed -->
           <select id="speed-select" onchange="setSpeed(this.value)"
@@ -1494,8 +1498,17 @@
       }
     };
 
-    window.seekTo = function(val) {
-      currentStep = parseInt(val);
+    window.seekTo = function(hourVal) {
+      if (!stepsArray) return;
+      const hour = parseInt(hourVal);
+      // Find the step whose forecast hour is closest to the dragged position
+      let best = 0, bestDiff = Infinity;
+      for (let i = 0; i < stepsArray.length; i++) {
+        const d = Math.abs(stepsArray[i] - hour);
+        if (d < bestDiff) { bestDiff = d; best = i; }
+        if (d === 0) break;
+      }
+      currentStep = best;
       updateTimeline();
       renderFrame();
     };
@@ -1515,7 +1528,7 @@
         lastFrameTime = now;
         const nSteps = stepsArray ? stepsArray.length : 93;
         currentStep = (currentStep + 1) % nSteps;
-        document.getElementById('timeline').value = currentStep;
+        document.getElementById('timeline').value = stepsArray ? stepsArray[currentStep] : currentStep;
         updateTimeline();
         renderFrame();
       }
@@ -1527,6 +1540,7 @@
       if (!stepsArray || !runInitTime) return;
 
       const hour = stepsArray[currentStep];
+      document.getElementById('timeline').value = hour;
       const validTime = new Date(runInitTime.getTime() + hour * 3600 * 1000);
       const opts = { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' };
       const formatted = validTime.toLocaleDateString('en-US', opts) + ' UTC';
@@ -1690,8 +1704,16 @@
         const runLabel = `ICON ${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')} ${String(hour).padStart(2,'0')}Z`;
         document.getElementById('run-badge').textContent = runLabel;
 
-        // Set timeline max
-        document.getElementById('timeline').max = stepsArray.length - 1;
+        // Set timeline range to actual forecast hours (not step count)
+        const maxHour = stepsArray[stepsArray.length - 1];
+        const breakHour = 78; // last 1-hourly step; 3-hourly begins at +81h
+        const tlEl = document.getElementById('timeline');
+        tlEl.max   = maxHour;
+        tlEl.value = 0;
+        // Position the break-tick proportionally
+        const breakPct = (breakHour / maxHour) * 100;
+        const tickEl = document.getElementById('timeline-break');
+        if (tickEl) tickEl.style.left = `${breakPct}%`;
 
         showToast('Dashboard ready — draw a rectangle on the map to load forecast data.', 'info');
       } catch (err) {

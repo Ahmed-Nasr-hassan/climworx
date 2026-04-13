@@ -179,13 +179,16 @@ def resolve_available_run(run_date: str, model_run: str, param: str, model: str)
         # Step back 6 hours
         dt = dt - timedelta(hours=6)
 
+    # Probe t_2m step-0 (always published for every ICON run) rather than the
+    # target param — MAX/interval fields like vmax_10m have no step-0 file,
+    # which would cause all candidates to 404 even when the run exists.
     for run_dt in candidates:
         hh = run_dt[8:10]
         fname_prefix = "icon_global" if model == "icon" else model.replace("-", "_")
         url = (
-            f"{DWD_BASE}/{model}/grib/{hh}/{param}/"
+            f"{DWD_BASE}/{model}/grib/{hh}/t_2m/"
             f"{fname_prefix}_icosahedral_single-level"
-            f"_{run_dt}_000_{param.upper()}.grib2.bz2"
+            f"_{run_dt}_000_T_2M.grib2.bz2"
         )
         try:
             resp = requests.head(url, timeout=15)
