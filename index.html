@@ -90,6 +90,31 @@
       -webkit-backdrop-filter: blur(20px);
       border: 1px solid rgba(255, 255, 255, 0.08);
     }
+    /* Stronger panel treatment on darker/vector basemaps for legibility */
+    body.theme-dark-panels .glass {
+      background: rgba(0, 0, 0, 0.62);
+      border-color: rgba(255, 255, 255, 0.18);
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    }
+    body.theme-dark-panels .maplibregl-ctrl-top-right .maplibregl-ctrl-group {
+      background: rgba(0, 0, 0, 0.62);
+      border-color: rgba(255, 255, 255, 0.18);
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    }
+    body.theme-dark-panels #run-badge,
+    body.theme-dark-panels #clock-meta,
+    body.theme-dark-panels #area-info,
+    body.theme-dark-panels #legend-max,
+    body.theme-dark-panels #legend-min,
+    body.theme-dark-panels #step-label,
+    body.theme-dark-panels #basemap-attrib,
+    body.theme-dark-panels #tooltip-coords {
+      color: rgba(255, 255, 255, 0.78) !important;
+    }
+    body.theme-dark-panels #controls [class*="text-white/40"],
+    body.theme-dark-panels #controls [class*="text-white/50"] {
+      color: rgba(255, 255, 255, 0.74) !important;
+    }
     /* Timeline slider styling */
     input[type="range"] { -webkit-appearance: none; background: transparent; }
     input[type="range"]::-webkit-slider-runnable-track {
@@ -693,6 +718,9 @@
         if (mode === 'imagery') attrib.textContent = 'Imagery © Esri, Maxar, Earthstar Geographics';
         if (mode === 'topo')    attrib.textContent = '© CARTO Voyager';
       }
+
+      // Use higher-contrast glass treatment on dark/vector basemaps.
+      document.body.classList.toggle('theme-dark-panels', mode !== 'imagery');
     }
 
     let PATCHED_DARK_STYLE = null;
