@@ -71,8 +71,9 @@ def deaccumulate_since_init(da: xr.DataArray) -> xr.DataArray:
 
 
 def squeeze_height(da: xr.DataArray) -> xr.DataArray:
-    if "height" in da.dims:
-        return da.isel(height=0, drop=True)
+    for dim in da.dims:
+        if "height" in str(dim).lower():
+            return da.isel({dim: 0}, drop=True)
     return da
 
 
@@ -81,7 +82,7 @@ def load_param(fs: s3fs.S3FileSystem, run_dt: str, param: str) -> xr.DataArray:
     if not fs.exists(root):
         raise FileNotFoundError(f"Missing parameter store: s3://{root}")
     store = s3fs.S3Map(root=root, s3=fs, check=False)
-    ds = xr.open_zarr(store, consolidated=True, chunks={"step": -1, "lat": CHUNK_LAT, "lon": CHUNK_LON})
+    ds = xr.open_zarr(store, consolidated=True, chunks="auto")
     if param not in ds.data_vars:
         if len(ds.data_vars) == 1:
             only = list(ds.data_vars)[0]
@@ -90,7 +91,22 @@ def load_param(fs: s3fs.S3FileSystem, run_dt: str, param: str) -> xr.DataArray:
             raise KeyError(f"Parameter variable '{param}' not found in {root}")
     else:
         da = ds[param]
-    return squeeze_height(da)
+    da = squeeze_height(da)
+
+    chunk_map: dict[str, int] = {}
+    if "step" in da.dims:
+        chunk_map["step"] = -1
+    for lat_name in ("lat", "latitude"):
+        if lat_name in da.dims:
+            chunk_map[lat_name] = CHUNK_LAT
+            break
+    for lon_name in ("lon", "longitude"):
+        if lon_name in da.dims:
+            chunk_map[lon_name] = CHUNK_LON
+            break
+    if chunk_map:
+        da = da.chunk(chunk_map)
+    return da
 
 
 def resolve_run_dt(fs: s3fs.S3FileSystem, run_dt: str | None) -> str:
@@ -150,7 +166,18 @@ def write_pet(fs: s3fs.S3FileSystem, run_dt: str, pet: xr.DataArray) -> None:
     zarr_path = f"{BUCKET}/runs/{run_dt}/pet_pm"
     store = s3fs.S3Map(root=zarr_path, s3=fs, check=False)
 
-    chunks = tuple(ds["pet_pm"].shape[0:1]) + (CHUNK_LAT, CHUNK_LON)
+    pet_dims = ds["pet_pm"].dims
+    chunks_by_dim: list[int] = []
+    for dim in pet_dims:
+        if dim == "step":
+            chunks_by_dim.append(ds["pet_pm"].sizes[dim])
+        elif dim in ("lat", "latitude"):
+            chunks_by_dim.append(CHUNK_LAT)
+        elif dim in ("lon", "longitude"):
+            chunks_by_dim.append(CHUNK_LON)
+        else:
+            chunks_by_dim.append(1)
+    chunks = tuple(chunks_by_dim)
     ds["pet_pm"].encoding = {
         "compressor": GZip(level=5),
         "dtype": "float32",
@@ -158,7 +185,7 @@ def write_pet(fs: s3fs.S3FileSystem, run_dt: str, pet: xr.DataArray) -> None:
         "dimension_separator": ".",
         "_FillValue": None,
     }
-    ds.to_zarr(store=store, mode="w", consolidated=True)
+    ds.to_zarr(store=store, mode="w", consolidated=True, zarr_version=2)
     with fs.open(f"{zarr_path}/_SUCCESS", "w") as f:
         f.write("ok\n")
     log.info("PET written: s3://%s", zarr_path)
@@ -166,8 +193,12 @@ def write_pet(fs: s3fs.S3FileSystem, run_dt: str, pet: xr.DataArray) -> None:
 
 def update_spatial_index(fs: s3fs.S3FileSystem, run_dt: str) -> None:
     key = f"{BUCKET}/spatial_index.json"
-    with fs.open(key, "r") as f:
-        idx = json.load(f)
+    if fs.exists(key):
+        with fs.open(key, "r") as f:
+            idx = json.load(f)
+    else:
+        idx = {"run": run_dt, "params": []}
+        log.info("spatial_index.json missing; creating a new one for run=%s", run_dt)
 
     if idx.get("run") != run_dt:
         log.warning("spatial_index run=%s differs from target run=%s; leaving unchanged", idx.get("run"), run_dt)

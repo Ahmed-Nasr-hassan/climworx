@@ -35,7 +35,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install xarray zarr s3fs numcodecs numpy dask
+          pip install xarray zarr s3fs numcodecs numpy "dask[array]"
 
       - name: Derive PET from promoted run
         env:
