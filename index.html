@@ -221,6 +221,11 @@
       <svg class="inline w-4 h-4 mr-1 -mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg>
       <span id="btn-draw-label">Draw area</span>
     </button>
+    <button type="button"
+            class="w-full mt-2 py-2 rounded-xl text-xs font-medium bg-white/10 text-white/80 border border-white/15 hover:bg-white/15 transition-all"
+            onclick="clearDrawing()">
+      Clear
+    </button>
 
     <!-- Layer appearance -->
     <div class="space-y-2 pt-2 border-t border-white/10">
@@ -366,6 +371,41 @@
     <div class="text-center">
       <div class="w-10 h-10 border-2 border-white/20 border-t-white rounded-full spinner mx-auto"></div>
       <div id="loading-text" class="text-sm text-white/70 mt-3">Loading forecast data...</div>
+      <div id="loading-progress-wrap" class="hidden mt-3 w-64 mx-auto">
+        <div class="h-2 rounded-full bg-white/20 overflow-hidden">
+          <div id="loading-progress-bar" class="h-full bg-emerald-400 transition-all duration-200" style="width: 0%"></div>
+        </div>
+        <div id="loading-progress-label" class="text-[11px] text-white/60 mt-1">0%</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== Confirm Modal ====== -->
+  <div id="confirm-modal" class="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm hidden items-center justify-center p-4">
+    <div class="glass rounded-2xl shadow-2xl w-full max-w-lg p-5 text-white max-h-[85vh] overflow-y-auto">
+      <h3 id="confirm-title" class="text-lg font-semibold">Confirm</h3>
+      <p id="confirm-message" class="text-sm text-white/75 mt-2 whitespace-pre-line"></p>
+      <div class="mt-4 space-y-2">
+        <div id="confirm-alt-wrap" class="hidden glass rounded-xl border border-amber-300/30 px-3 py-2">
+          <div class="flex items-center justify-between gap-2">
+            <div class="text-xs font-medium text-amber-100">Downscale</div>
+            <button id="confirm-alt-help" type="button" class="w-7 h-7 rounded-full border border-amber-300/40 text-amber-200 text-xs hover:bg-amber-300/10 shrink-0">?</button>
+          </div>
+          <div id="confirm-alt-options" class="mt-2 grid grid-cols-2 gap-2">
+            <button id="confirm-alt-opt1" type="button" title="2x2 mean: averages up to 4 source cells per output cell. Better detail, moderate speed." aria-label="2x2 mean downscale option" class="px-2 py-1.5 rounded-lg text-xs border border-amber-300/50 bg-amber-300/20 text-amber-100 hover:bg-amber-300/30">2x2 mean</button>
+            <button id="confirm-alt-opt2" type="button" title="3x3 mean: averages up to 9 source cells per output cell. Faster and lighter, smoother output." aria-label="3x3 mean downscale option" class="px-2 py-1.5 rounded-lg text-xs border border-amber-300/50 bg-amber-300/20 text-amber-100 hover:bg-amber-300/30">3x3 mean</button>
+          </div>
+        </div>
+        <div id="confirm-help-panel" class="hidden rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-xs text-white/75"></div>
+      </div>
+      <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <button id="confirm-cancel" class="px-3 py-2 rounded-lg border border-white/20 text-white/80 hover:text-white hover:bg-white/10 text-sm order-2 sm:order-1">
+          Cancel
+        </button>
+        <button id="confirm-ok" class="px-3 py-2 rounded-lg bg-emerald-500/80 hover:bg-emerald-500 text-white text-sm font-medium order-1 sm:order-2">
+          Continue
+        </button>
+      </div>
     </div>
   </div>
 
@@ -386,6 +426,8 @@
     const NY = 1441;
     const NX = 2879;
     const MAX_PIXELS = 150000;
+    const EXTREME_PIXELS = 500000;
+    const HARD_MAX_PIXELS = 1000000;
 
     const BASEMAP_DARK_URL =
       'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
@@ -569,6 +611,135 @@
       setTimeout(() => el.remove(), 6000);
     }
 
+    function showLoading(text = 'Loading forecast data...') {
+      const loading = document.getElementById('loading');
+      const loadingText = document.getElementById('loading-text');
+      if (loadingText) loadingText.textContent = text;
+      setLoadingProgress(null);
+      if (loading) loading.classList.remove('hidden');
+    }
+
+    function setLoadingText(text) {
+      const loadingText = document.getElementById('loading-text');
+      if (loadingText) loadingText.textContent = text;
+    }
+
+    function hideLoading() {
+      const loading = document.getElementById('loading');
+      setLoadingProgress(null);
+      if (loading) loading.classList.add('hidden');
+    }
+
+    function showConfirmDialog(message, opts = {}) {
+      const {
+        title = 'Confirm action',
+        confirmText = 'Continue',
+        cancelText = 'Cancel',
+        altText = null,
+        altHelpText = '',
+        alt2Text = null,
+        alt2HelpText = '',
+      } = opts;
+
+      const modal = document.getElementById('confirm-modal');
+      const titleEl = document.getElementById('confirm-title');
+      const messageEl = document.getElementById('confirm-message');
+      const okBtn = document.getElementById('confirm-ok');
+      const cancelBtn = document.getElementById('confirm-cancel');
+      const altWrap = document.getElementById('confirm-alt-wrap');
+      const altHelpBtn = document.getElementById('confirm-alt-help');
+      const altOpt1Btn = document.getElementById('confirm-alt-opt1');
+      const altOpt2Btn = document.getElementById('confirm-alt-opt2');
+      const helpPanel = document.getElementById('confirm-help-panel');
+      if (!modal || !titleEl || !messageEl || !okBtn || !cancelBtn || !altWrap || !altHelpBtn || !altOpt1Btn || !altOpt2Btn || !helpPanel) {
+        return Promise.resolve(window.confirm(message) ? 'confirm' : 'cancel');
+      }
+
+      titleEl.textContent = title;
+      messageEl.textContent = message;
+      okBtn.textContent = confirmText;
+      cancelBtn.textContent = cancelText;
+      if (altText) {
+        altWrap.classList.remove('hidden');
+      } else {
+        altWrap.classList.add('hidden');
+      }
+      altOpt1Btn.textContent = altText || '2x2 mean';
+      altOpt2Btn.textContent = alt2Text || '3x3 mean';
+      helpPanel.classList.add('hidden');
+      helpPanel.textContent = '';
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+
+      return new Promise((resolve) => {
+        const cleanup = () => {
+          modal.classList.add('hidden');
+          modal.classList.remove('flex');
+          okBtn.removeEventListener('click', onOk);
+          cancelBtn.removeEventListener('click', onCancel);
+          altHelpBtn.removeEventListener('click', onAltHelp);
+          altOpt1Btn.removeEventListener('click', onAltOpt1);
+          altOpt2Btn.removeEventListener('click', onAltOpt2);
+          modal.removeEventListener('click', onBackdrop);
+          window.removeEventListener('keydown', onKeydown);
+        };
+        const onOk = () => {
+          cleanup();
+          resolve('confirm');
+        };
+        const onCancel = () => {
+          cleanup();
+          resolve('cancel');
+        };
+        const onAltOpt1 = () => {
+          cleanup();
+          resolve('alt');
+        };
+        const onAltOpt2 = () => {
+          cleanup();
+          resolve('alt2');
+        };
+        const onAltHelp = () => {
+          const t2 = altHelpText || '2x2 mean averages up to 4 source cells per output cell.';
+          const t3 = alt2HelpText || '3x3 mean averages up to 9 source cells per output cell (faster, smoother).';
+          helpPanel.textContent = `Downscale modes:\n• ${t2}\n• ${t3}`;
+          helpPanel.classList.remove('hidden');
+        };
+        const onBackdrop = (e) => {
+          if (e.target === modal) onCancel();
+        };
+        const onKeydown = (e) => {
+          if (e.key === 'Escape') onCancel();
+          if (e.key === 'Enter') onOk();
+        };
+
+        okBtn.addEventListener('click', onOk);
+        cancelBtn.addEventListener('click', onCancel);
+        altHelpBtn.addEventListener('click', onAltHelp);
+        altOpt1Btn.addEventListener('click', onAltOpt1);
+        altOpt2Btn.addEventListener('click', onAltOpt2);
+        modal.addEventListener('click', onBackdrop);
+        window.addEventListener('keydown', onKeydown);
+      });
+    }
+
+    function setLoadingProgress(percent, label = null) {
+      const wrap = document.getElementById('loading-progress-wrap');
+      const bar = document.getElementById('loading-progress-bar');
+      const progressLabel = document.getElementById('loading-progress-label');
+      if (!wrap || !bar || !progressLabel) return;
+      if (percent == null || Number.isNaN(percent)) {
+        wrap.classList.add('hidden');
+        bar.style.width = '0%';
+        progressLabel.textContent = '0%';
+        return;
+      }
+      const clamped = Math.max(0, Math.min(100, Number(percent)));
+      wrap.classList.remove('hidden');
+      bar.style.width = `${clamped}%`;
+      progressLabel.textContent = label ?? `${Math.round(clamped)}%`;
+    }
+
     // =======================================================================
     // Data Fetching (Manual Zarr chunk reads — no zarr.js library needed)
     // =======================================================================
@@ -598,7 +769,7 @@
      *
      * Returns Float32Array of shape [nSteps, nLat, nLon] (C-order).
      */
-    async function fetchSlice(param, latStart, latEnd, lonStart, lonEnd) {
+    async function fetchSlice(param, latStart, latEnd, lonStart, lonEnd, sampleStride = 1) {
       // Read .zarray to know shape/chunks
       const meta = await fetchJson(`${param}/${param}/.zarray`);
       const shape = meta.shape;
@@ -614,8 +785,10 @@
       const chunkLon = chunks[lonDim];  // 100
       const nSteps = shape[0];
 
-      const nLat = latEnd - latStart;
-      const nLon = lonEnd - lonStart;
+      const nLatRaw = latEnd - latStart;
+      const nLonRaw = lonEnd - lonStart;
+      const nLat = Math.ceil(nLatRaw / sampleStride);
+      const nLon = Math.ceil(nLonRaw / sampleStride);
 
       // Chunk index ranges that overlap the bounding box
       const chunkLatStart = Math.floor(latStart / chunkLat);
@@ -624,8 +797,10 @@
       const chunkLonEnd   = Math.floor((lonEnd - 1) / chunkLon);
 
       // Prepare output: [nSteps, nLat, nLon]
+      // sampleStride > 1 uses block-mean aggregation (e.g. 2x2 mean for stride=2).
       const out = new Float32Array(nSteps * nLat * nLon);
-      out.fill(NaN);
+      const counts = sampleStride > 1 ? new Uint8Array(nSteps * nLat * nLon) : null;
+      if (sampleStride === 1) out.fill(NaN);
 
       // Build list of chunks to fetch
       const chunkJobs = [];
@@ -637,8 +812,8 @@
 
       const totalChunks = chunkJobs.length;
       let fetched = 0;
-      document.getElementById('loading-text').textContent =
-        `Loading forecast data... (0/${totalChunks} chunks)`;
+      setLoadingText(`Loading forecast data... (0/${totalChunks} chunks)`);
+      setLoadingProgress(0, '0%');
 
       // Fetch chunks in parallel (batches of 6 to avoid overwhelming)
       const BATCH = 6;
@@ -676,14 +851,24 @@
               for (let li = 0; li < actualChunkLat; li++) {
                 const globalLat = chunkLatOffset + li;
                 if (globalLat < latStart || globalLat >= latEnd) continue;
+                const relLat = globalLat - latStart;
+                const outI = sampleStride === 1 ? relLat : Math.floor(relLat / sampleStride);
 
                 for (let lj = 0; lj < actualChunkLon; lj++) {
                   const globalLon = chunkLonOffset + lj;
                   if (globalLon < lonStart || globalLon >= lonEnd) continue;
+                  const relLon = globalLon - lonStart;
+                  const outJ = sampleStride === 1 ? relLon : Math.floor(relLon / sampleStride);
 
                   const srcIdx = stepOffset + li * actualChunkLon + lj;
-                  const dstIdx = s * nLat * nLon + (globalLat - latStart) * nLon + (globalLon - lonStart);
-                  out[dstIdx] = chunkData[srcIdx];
+                  const dstIdx = s * nLat * nLon + outI * nLon + outJ;
+                  const srcVal = chunkData[srcIdx];
+                  if (sampleStride === 1) {
+                    out[dstIdx] = srcVal;
+                  } else if (Number.isFinite(srcVal)) {
+                    out[dstIdx] += srcVal;
+                    counts[dstIdx] += 1;
+                  }
                 }
               }
             }
@@ -692,18 +877,26 @@
           }
 
           fetched++;
-          document.getElementById('loading-text').textContent =
-            `Loading forecast data... (${fetched}/${totalChunks} chunks)`;
+          setLoadingText(`Loading forecast data... (${fetched}/${totalChunks} chunks)`);
+          const pct = totalChunks > 0 ? (fetched / totalChunks) * 100 : 100;
+          setLoadingProgress(pct, `${Math.round(pct)}%`);
         }));
       }
 
-      return { data: out, nSteps, nLat, nLon };
+      if (sampleStride > 1) {
+        for (let i = 0; i < out.length; i++) {
+          const c = counts[i];
+          out[i] = c > 0 ? out[i] / c : NaN;
+        }
+      }
+
+      return { data: out, nSteps, nLat, nLon, sampleStride };
     }
 
-    async function fetchCombinedWindSlice(latStart, latEnd, lonStart, lonEnd) {
+    async function fetchCombinedWindSlice(latStart, latEnd, lonStart, lonEnd, sampleStride = 1) {
       const [uResult, vResult] = await Promise.all([
-        fetchSlice('u_10m', latStart, latEnd, lonStart, lonEnd),
-        fetchSlice('v_10m', latStart, latEnd, lonStart, lonEnd),
+        fetchSlice('u_10m', latStart, latEnd, lonStart, lonEnd, sampleStride),
+        fetchSlice('v_10m', latStart, latEnd, lonStart, lonEnd, sampleStride),
       ]);
       const out = new Float32Array(uResult.data.length);
       for (let idx = 0; idx < out.length; idx++) {
@@ -716,6 +909,7 @@
         nSteps: uResult.nSteps,
         nLat: uResult.nLat,
         nLon: uResult.nLon,
+        sampleStride: uResult.sampleStride,
       };
     }
 
@@ -1236,6 +1430,26 @@
       setDrawAreaToggleUi(true);
     };
 
+    window.clearDrawing = function() {
+      if (draw) {
+        draw.deleteAll();
+        try { draw.changeMode('simple_select'); } catch (_) {}
+      }
+      if (playing) togglePlay();
+      sliceData = null;
+      windUSliceData = null;
+      windVSliceData = null;
+      sliceBounds = null;
+      clearDataOverlay();
+      document.getElementById('playback')?.classList.add('hidden');
+      document.getElementById('clock')?.classList.add('hidden');
+      document.getElementById('legend')?.classList.add('hidden');
+      document.getElementById('area-info')?.classList.add('hidden');
+      document.getElementById('tooltip')?.classList.add('hidden');
+      map.getContainer().classList.remove('draw-area-active');
+      setDrawAreaToggleUi(false);
+    };
+
     async function onDrawComplete(e) {
       setDrawAreaToggleUi(false);
       map.getContainer().classList.remove('draw-area-active');
@@ -1261,18 +1475,49 @@
       const nLon = lonEnd - lonStart;
       const totalPixels = nLat * nLon;
 
-      if (totalPixels > MAX_PIXELS) {
-        showToast(`Selected area is too large (${totalPixels.toLocaleString()} pixels). Draw a smaller region (max ~390×390).`, 'error');
+      if (totalPixels > HARD_MAX_PIXELS) {
+        showToast(`Selected area is too large (${totalPixels.toLocaleString()} pixels). Maximum is ${HARD_MAX_PIXELS.toLocaleString()}. Draw a smaller region.`, 'error');
         draw.deleteAll();
         setDrawAreaToggleUi(false);
         return;
       }
+      if (totalPixels > MAX_PIXELS) {
+        showToast(`Large selection (${totalPixels.toLocaleString()} pixels). Loading may be slow and use more memory.`, 'info');
+      }
+      let sampleStride = 1;
+      if (totalPixels > EXTREME_PIXELS) {
+        const choice = await showConfirmDialog(
+          `You selected a very large area (${totalPixels.toLocaleString()} pixels). This can be slow or freeze older devices.\n\nContinue anyway?`,
+          {
+            title: 'Very large selection',
+            confirmText: 'Full resolution',
+            altText: '2x2 mean',
+            altHelpText: '2x2 mean: each output pixel is the average of up to 4 source cells. Good quality/speed balance.',
+            alt2Text: '3x3 mean',
+            alt2HelpText: '3x3 mean: each output pixel averages up to 9 source cells. Faster and lighter, but smoother/less detail.',
+            cancelText: 'Cancel',
+          },
+        );
+        if (choice === 'cancel') {
+          draw.deleteAll();
+          setDrawAreaToggleUi(false);
+          return;
+        }
+        if (choice === 'alt') {
+          sampleStride = 2;
+          showToast('Downscaling enabled (2x2 mean). Faster load with smoother detail.', 'info');
+        } else if (choice === 'alt2') {
+          sampleStride = 3;
+          showToast('Downscaling enabled (3x3 mean). Lightest load with softer detail.', 'info');
+        }
+      }
 
       // Store bounds for canvas rendering
-      sliceBounds = { south, west, north, east, latStart, latEnd, lonStart, lonEnd, nLat, nLon };
+      sliceBounds = { south, west, north, east, latStart, latEnd, lonStart, lonEnd, nLat, nLon, sampleStride };
 
       // Show loading
-      document.getElementById('loading').classList.remove('hidden');
+      showLoading('Preparing request...');
+      setLoadingProgress(5, 'Preparing');
 
       try {
         // Release old data
@@ -1281,13 +1526,20 @@
         windVSliceData = null;
 
         const result = isWindCompositeParam()
-          ? await fetchCombinedWindSlice(latStart, latEnd, lonStart, lonEnd)
-          : await fetchSlice(currentParam, latStart, latEnd, lonStart, lonEnd);
+          ? await fetchCombinedWindSlice(latStart, latEnd, lonStart, lonEnd, sampleStride)
+          : await fetchSlice(currentParam, latStart, latEnd, lonStart, lonEnd, sampleStride);
+        setLoadingText('Processing data...');
+        setLoadingProgress(90, 'Processing');
         sliceData = result.data;
         windUSliceData = result.uData || null;
         windVSliceData = result.vData || null;
+        sliceBounds.nLat = result.nLat;
+        sliceBounds.nLon = result.nLon;
+        sliceBounds.sampleStride = result.sampleStride || 1;
 
         // Compute min/max for color scale (excluding NaN)
+        setLoadingText('Computing color scale...');
+        setLoadingProgress(95, 'Finalizing');
         computeColorScale();
 
         // Show UI
@@ -1297,11 +1549,16 @@
         document.getElementById('legend').classList.remove('hidden');
 
         document.getElementById('area-info').classList.remove('hidden');
+        const outPixels = result.nLat * result.nLon;
+        const dsTag = sliceBounds.sampleStride > 1 ? ` | downscaled ${sliceBounds.sampleStride}x` : '';
         document.getElementById('area-info').textContent =
-          `${nLat}×${nLon} pixels (${totalPixels.toLocaleString()}) | ${sliceBounds.nLat * 0.125}° × ${sliceBounds.nLon * 0.125}°`;
+          `${result.nLat}×${result.nLon} pixels (${outPixels.toLocaleString()}) from ${totalPixels.toLocaleString()} selected${dsTag}`;
 
         updateTimeline();
         renderLegend();
+        setLoadingText('Rendering map...');
+        setLoadingProgress(99, 'Rendering');
+        await new Promise(requestAnimationFrame);
         renderFrame();
 
         // Clear the drawn rectangle — the color overlay is now the selection
@@ -1317,7 +1574,7 @@
         showToast(`Failed to fetch data: ${err.message}`, 'error');
         console.error(err);
       } finally {
-        document.getElementById('loading').classList.add('hidden');
+        hideLoading();
       }
     }
 
@@ -1707,10 +1964,11 @@
               const pa = edges[ea];
               const pb = edges[eb];
               if (pa && pb) {
-                const aLon = indexToLon(sliceBounds.lonStart + pa.x / ss);
-                const aLat = indexToLat(sliceBounds.latStart + pa.y / ss);
-                const bLon = indexToLon(sliceBounds.lonStart + pb.x / ss);
-                const bLat = indexToLat(sliceBounds.latStart + pb.y / ss);
+                const dss = sliceBounds.sampleStride || 1;
+                const aLon = indexToLon(sliceBounds.lonStart + (pa.x / ss) * dss);
+                const aLat = indexToLat(sliceBounds.latStart + (pa.y / ss) * dss);
+                const bLon = indexToLon(sliceBounds.lonStart + (pb.x / ss) * dss);
+                const bLat = indexToLat(sliceBounds.latStart + (pb.y / ss) * dss);
                 contourSegments.push({
                   a: { lat: aLat, lon: aLon },
                   b: { lat: bLat, lon: bLon },
@@ -1736,8 +1994,9 @@
         }
         if (labelText && labelPoints.length) {
           for (const p of labelPoints) {
-            const lon = indexToLon(sliceBounds.lonStart + p.x / ss);
-            const lat = indexToLat(sliceBounds.latStart + p.y / ss);
+            const dss = sliceBounds.sampleStride || 1;
+            const lon = indexToLon(sliceBounds.lonStart + (p.x / ss) * dss);
+            const lat = indexToLat(sliceBounds.latStart + (p.y / ss) * dss);
             collectedLabels.push({ lat, lon, text: labelText });
           }
         }
@@ -1754,7 +2013,7 @@
     function renderFrame() {
       if (!sliceData || !sliceBounds || !renderCtx || !renderCanvas || !map) return;
 
-      const { nLat, nLon, latStart, lonStart } = sliceBounds;
+      const { nLat, nLon, latStart, lonStart, latEnd, lonEnd } = sliceBounds;
       const stepBase = currentStep * nLat * nLon;
       const layerOp = getLayerOpacity();
       const smooth = isSmoothField();
@@ -1793,9 +2052,9 @@
       }
       const coordinates = [
         [indexToLon(lonStart), indexToLat(latStart)],
-        [indexToLon(lonStart + nLon), indexToLat(latStart)],
-        [indexToLon(lonStart + nLon), indexToLat(latStart + nLat)],
-        [indexToLon(lonStart), indexToLat(latStart + nLat)],
+        [indexToLon(lonEnd), indexToLat(latStart)],
+        [indexToLon(lonEnd), indexToLat(latEnd)],
+        [indexToLon(lonStart), indexToLat(latEnd)],
       ];
 
       const imageUrl = renderCanvas.toDataURL('image/png');
@@ -1937,7 +2196,7 @@
     function computeWindStreamlines() {
       windStreamlines = null;
       if (!isWindCompositeParam() || !windUSliceData || !windVSliceData || !sliceBounds) return;
-      const { nLat, nLon, latStart, lonStart } = sliceBounds;
+      const { nLat, nLon, latStart, lonStart, sampleStride = 1 } = sliceBounds;
       const stepBase = currentStep * nLat * nLon;
       const maxSeeds = isMobile() ? 18 : 28;
       const seedStride = Math.max(3, Math.ceil(Math.max(nLat, nLon) / maxSeeds));
@@ -1958,8 +2217,8 @@
           const gridPts = [...back, { x: fj0, y: fi0 }, ...fwd];
           if (gridPts.length < 3) continue;
           const pts = gridPts.map(p => ({
-            lat: indexToLat(latStart + p.y),
-            lon: indexToLon(lonStart + p.x),
+            lat: indexToLat(latStart + p.y * sampleStride),
+            lon: indexToLon(lonStart + p.x * sampleStride),
           }));
           lines.push({ pts, speed: sp0 });
         }
@@ -2150,22 +2409,31 @@
         windUSliceData = null;
         windVSliceData = null;
         clearDataOverlay();
-        document.getElementById('loading').classList.remove('hidden');
+        showLoading('Preparing request...');
+        setLoadingProgress(5, 'Preparing');
 
         const fetcher = isWindCompositeParam(param)
-          ? fetchCombinedWindSlice(sliceBounds.latStart, sliceBounds.latEnd, sliceBounds.lonStart, sliceBounds.lonEnd)
-          : fetchSlice(param, sliceBounds.latStart, sliceBounds.latEnd, sliceBounds.lonStart, sliceBounds.lonEnd);
+          ? fetchCombinedWindSlice(sliceBounds.latStart, sliceBounds.latEnd, sliceBounds.lonStart, sliceBounds.lonEnd, sliceBounds.sampleStride || 1)
+          : fetchSlice(param, sliceBounds.latStart, sliceBounds.latEnd, sliceBounds.lonStart, sliceBounds.lonEnd, sliceBounds.sampleStride || 1);
         fetcher
           .then(result => {
+            setLoadingText('Processing data...');
+            setLoadingProgress(90, 'Processing');
             sliceData = result.data;
             windUSliceData = result.uData || null;
             windVSliceData = result.vData || null;
+            sliceBounds.nLat = result.nLat;
+            sliceBounds.nLon = result.nLon;
+            setLoadingText('Computing color scale...');
+            setLoadingProgress(95, 'Finalizing');
             computeColorScale();
             renderLegend();
+            setLoadingText('Rendering map...');
+            setLoadingProgress(99, 'Rendering');
             renderFrame();
           })
           .catch(err => showToast(`Failed: ${err.message}`, 'error'))
-          .finally(() => document.getElementById('loading').classList.add('hidden'));
+          .finally(() => hideLoading());
       }
     };
 
@@ -2176,7 +2444,7 @@
       if (!sliceData || !sliceBounds) return;
 
       const tooltip = document.getElementById('tooltip');
-      const { latStart, lonStart, nLat, nLon } = sliceBounds;
+      const { latStart, lonStart, nLat, nLon, sampleStride = 1 } = sliceBounds;
 
       // Screen → geo
       const lngLat = map.unproject([e.clientX, e.clientY]);
@@ -2184,8 +2452,8 @@
       const lon = lngLat.lng;
 
       // Geo → data index
-      const gi = latToIndex(lat) - latStart;
-      const gj = lonToIndex(lon) - lonStart;
+      const gi = Math.round((latToIndex(lat) - latStart) / sampleStride);
+      const gj = Math.round((lonToIndex(lon) - lonStart) / sampleStride);
 
       if (gi < 0 || gi >= nLat || gj < 0 || gj >= nLon) {
         tooltip.classList.add('hidden');
