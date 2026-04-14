@@ -41,6 +41,10 @@ concurrency:
   group: icon-etl-${{ github.event.inputs.model_run || 'auto' }}-${{ github.event.inputs.run_date || 'today' }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   # =========================================================================
   # Job 0: Resolve model run (00/06/12/18) from wall-clock UTC hour
@@ -51,7 +55,50 @@ jobs:
     outputs:
       model_run: ${{ steps.detect.outputs.MODEL_RUN }}
       run_date:  ${{ steps.detect.outputs.RUN_DATE }}
+      image:     ${{ steps.image.outputs.IMAGE }}
     steps:
+      - name: Resolve ETL image (pin to commit SHA for reproducibility)
+        id: image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          REPO="ghcr.io/${OWNER_LC}/climworx-etl"
+          SHA="${{ github.sha }}"
+          IMAGE="${REPO}:${SHA}"
+
+          # Wait up to ~5 min for the SHA-tagged image to exist. This closes
+          # the race where a push triggers main.yml before build-image.yml
+          # finishes publishing. Falls back to :latest on timeout so scheduled
+          # runs on unchanged code still work (tag already exists immediately).
+          TOKEN=$(echo -n "${GH_TOKEN}" | base64)
+          MANIFEST_URL="https://ghcr.io/v2/${OWNER_LC}/climworx-etl/manifests/${SHA}"
+          found=0
+          for i in $(seq 1 30); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+              "${MANIFEST_URL}" || echo "000")
+            if [ "$CODE" = "200" ]; then
+              echo "Image ${IMAGE} ready (HTTP 200 on attempt $i/30)"
+              found=1; break
+            fi
+            if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
+              echo "::warning::GHCR auth failed (HTTP $CODE) — check token base64 encoding / packages:read permission"
+            fi
+            echo "Image ${IMAGE} not ready yet (HTTP $CODE, attempt $i/30)"
+            sleep 10
+          done
+
+          if [ "$found" -ne 1 ]; then
+            echo "::warning::SHA-tagged image not published within 5 min; falling back to :latest"
+            IMAGE="${REPO}:latest"
+          fi
+
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Using image: ${IMAGE}"
+
       - name: Detect model run from UTC hour
         id: detect
         run: |
@@ -101,6 +148,11 @@ jobs:
     name: Build CDO remap assets
     needs: resolve-run
     runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.resolve-run.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     env:
       # Bump this when you need to force a rebuild (e.g. new target grid).
       ASSETS_CACHE_KEY: cdo-remap-assets-v1
@@ -111,12 +163,6 @@ jobs:
         with:
           path: assets/
           key: ${{ env.ASSETS_CACHE_KEY }}
-
-      - name: Install CDO
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cdo bzip2
 
       - name: Build CDO remap assets (DWD native grid → weights)
         if: steps.cache.outputs.cache-hit != 'true'
@@ -209,6 +255,11 @@ jobs:
     name: "ETL · ${{ matrix.parameter }} · ${{ needs.resolve-run.outputs.model_run }}Z"
     needs: [resolve-run, build-assets]
     runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.resolve-run.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     strategy:
       max-parallel: 4
@@ -235,31 +286,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install CDO
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cdo bzip2
-
-      - name: Install Python dependencies
-        run: |
-          pip install --upgrade pip
-          pip install \
-            xarray \
-            dask \
-            cfgrib \
-            zarr \
-            s3fs \
-            numcodecs \
-            numpy \
-            requests \
-            netCDF4
 
       - name: Download prebuilt CDO remap assets
         uses: actions/download-artifact@v4
@@ -308,6 +334,11 @@ jobs:
       - resolve-run
       - etl
     runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.resolve-run.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     # Run even if some matrix jobs failed so we can send a clear failure alert
     if: always()
 
@@ -326,17 +357,6 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-
-      - name: Install Python dependencies
-        run: |
-          pip install --upgrade pip
-          pip install xarray dask zarr s3fs numcodecs numpy requests netCDF4
 
       - name: Discover successfully staged parameters
         id: discover
