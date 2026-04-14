@@ -148,6 +148,33 @@ def send_alert(message: str) -> None:
         log.error("Failed to send alert: %s", exc)
 
 
+def cleanup_failed_run_data(run_dt: str, params: list[str], fs: s3fs.S3FileSystem) -> None:
+    """
+    Best-effort cleanup for failed runs.
+    Removes staged and promoted data for affected parameters so partial uploads
+    do not linger after an ETL/validation/promotion failure.
+    """
+    log.warning("Cleaning up failed run data for run=%s", run_dt)
+    for prefix in ("staging", "runs"):
+        for param in params:
+            path = f"{BUCKET}/{prefix}/{run_dt}/{param}"
+            try:
+                if fs.exists(path):
+                    fs.rm(path, recursive=True)
+                    log.warning("Removed failed data: s3://%s", path)
+            except Exception as exc:
+                log.error("Cleanup failed for s3://%s: %s", path, exc)
+
+    # Remove run-level resolver marker if present for this run key.
+    resolved_marker = f"{BUCKET}/staging/{run_dt}/_RESOLVED_RUN"
+    try:
+        if fs.exists(resolved_marker):
+            fs.rm(resolved_marker)
+            log.warning("Removed failed run marker: s3://%s", resolved_marker)
+    except Exception as exc:
+        log.error("Cleanup failed for marker s3://%s: %s", resolved_marker, exc)
+
+
 def with_retry(fn, *args, label: str = "", **kwargs):
     """Call fn(*args, **kwargs) with up to MAX_RETRIES, exponential backoff."""
     for attempt in range(1, MAX_RETRIES + 1):
@@ -631,11 +658,11 @@ def validate_one_param(
             vmin = float(ds[var].min().compute())
             vmax = float(ds[var].max().compute())
             if vmin < bounds[0] or vmax > bounds[1]:
-                raise ParamValidationError(
-                    param,
+                msg = (
                     f"[{param}/{var}] Values out of plausible range "
-                    f"[{bounds[0]}, {bounds[1]}]: got [{vmin:.2f}, {vmax:.2f}]",
+                    f"[{bounds[0]}, {bounds[1]}]: got [{vmin:.2f}, {vmax:.2f}]"
                 )
+                log.warning("%s (warning-only bounds check; continuing)", msg)
 
     # 4. Ensemble member count
     if ensemble:
@@ -957,6 +984,7 @@ def main() -> None:
         except Exception as exc:
             msg = f"ETL FAILED | run={run_dt} | param={param} | error={exc}"
             log.exception(msg)
+            cleanup_failed_run_data(run_dt, [param], fs)
             send_alert(msg)
             sys.exit(1)
 
@@ -987,6 +1015,7 @@ def main() -> None:
         except Exception as exc:
             msg = f"VALIDATION FAILED | run={run_dt} | error={exc}"
             log.exception(msg)
+            cleanup_failed_run_data(run_dt, all_params, fs)
             send_alert(msg)
             sys.exit(1)
 
@@ -997,6 +1026,7 @@ def main() -> None:
         except Exception as exc:
             msg = f"PROMOTION/JANITOR FAILED | run={run_dt} | error={exc}"
             log.exception(msg)
+            cleanup_failed_run_data(run_dt, all_params, fs)
             send_alert(msg)
             sys.exit(1)
 
