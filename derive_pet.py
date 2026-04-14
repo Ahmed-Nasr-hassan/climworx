@@ -17,9 +17,11 @@ import argparse
 import json
 import logging
 import os
+import time
 import numpy as np
 import s3fs
 import xarray as xr
+from dask.diagnostics import ProgressBar
 from numcodecs import GZip
 
 BUCKET = "icon-global-databank"
@@ -185,7 +187,18 @@ def write_pet(fs: s3fs.S3FileSystem, run_dt: str, pet: xr.DataArray) -> None:
         "dimension_separator": ".",
         "_FillValue": None,
     }
-    ds.to_zarr(store=store, mode="w", consolidated=True, zarr_version=2)
+    log.info(
+        "Write config dims=%s sizes=%s chunks=%s",
+        ds["pet_pm"].dims,
+        {d: ds["pet_pm"].sizes[d] for d in ds["pet_pm"].dims},
+        chunks,
+    )
+    t0 = time.monotonic()
+    delayed = ds.to_zarr(store=store, mode="w", consolidated=True, compute=False, zarr_format=2)
+    log.info("Submitting Zarr write graph")
+    with ProgressBar():
+        delayed.compute()
+    log.info("Zarr write completed in %.1fs", time.monotonic() - t0)
     with fs.open(f"{zarr_path}/_SUCCESS", "w") as f:
         f.write("ok\n")
     log.info("PET written: s3://%s", zarr_path)
@@ -222,6 +235,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    t_start = time.monotonic()
     args = parse_args()
     fs = make_r2_fs()
     run_dt = resolve_run_dt(fs, args.run_dt)
@@ -249,8 +263,12 @@ def main() -> None:
     log.info("PET expression built; writing Zarr output")
     write_pet(fs, run_dt, pet)
     update_spatial_index(fs, run_dt)
-    log.info("Done.")
+    log.info("Done in %.1fs", time.monotonic() - t_start)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log.exception("Derive PET failed with an unhandled exception")
+        raise
