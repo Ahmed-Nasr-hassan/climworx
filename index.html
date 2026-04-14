@@ -279,6 +279,10 @@
         <input id="chk-contours" type="checkbox" class="rounded border-white/20 bg-white/5" />
         <span>Contours</span>
       </label>
+      <label id="chk-contour-labels-row" class="hidden items-center gap-2 text-xs text-white/70 cursor-pointer select-none pl-5">
+        <input id="chk-contour-labels" type="checkbox" checked class="rounded border-white/20 bg-white/5" />
+        <span>Show numbers</span>
+      </label>
     </div>
 
     <!-- Area info (shown when data loaded) -->
@@ -1035,7 +1039,13 @@
         });
       }
       document.getElementById('chk-smooth')?.addEventListener('change', () => renderFrame());
-      document.getElementById('chk-contours')?.addEventListener('change', () => renderFrame());
+      document.getElementById('chk-contours')?.addEventListener('change', (e) => {
+        const row = document.getElementById('chk-contour-labels-row');
+        if (row) row.classList.toggle('hidden', !e.target.checked);
+        if (row) row.classList.toggle('flex', !!e.target.checked);
+        renderFrame();
+      });
+      document.getElementById('chk-contour-labels')?.addEventListener('change', () => renderFrame());
 
       // Tooltip hover (mouse + touch) — attached to map container so the canvas
       // never needs to capture pointer events (which would block map panning).
@@ -1088,6 +1098,13 @@
 
       map.on('movestart', onMapInteractionStart);
       map.on('moveend',   onMapInteractionEnd);
+
+      let contourZoomTimer = null;
+      map.on('zoomend', () => {
+        if (!wantContours() || !sliceData) return;
+        clearTimeout(contourZoomTimer);
+        contourZoomTimer = setTimeout(() => renderFrame(), 80);
+      });
 
       // ── Playback panel: drag-to-reposition + chevron to minimize ─────────
       (function () {
@@ -1160,6 +1177,7 @@
       if (map.getSource(DATA_SOURCE_ID)) map.removeSource(DATA_SOURCE_ID);
       windStreamlines = null;
       clearWindOverlay();
+      clearContourLabels();
     }
 
     // =======================================================================
@@ -1211,6 +1229,8 @@
         return;
       }
       draw.deleteAll();
+      // Drawing interacts more reliably when animation is paused.
+      if (playing) togglePlay();
       draw.changeMode('draw_polygon');
       map.getContainer().classList.add('draw-area-active');
       setDrawAreaToggleUi(true);
@@ -1427,6 +1447,11 @@
       return !!(el && el.checked);
     }
 
+    function wantContourLabels() {
+      const el = document.getElementById('chk-contour-labels');
+      return !el || el.checked;
+    }
+
     function bilinearSample(base, nLat, nLon, fi, fj) {
       fi = Math.min(Math.max(fi, 0), nLat - 1 - 1e-9);
       fj = Math.min(Math.max(fj, 0), nLon - 1 - 1e-9);
@@ -1472,20 +1497,172 @@
       return { x: pA.x + t * (pB.x - pA.x), y: pA.y + t * (pB.y - pA.y) };
     }
 
+    // Contour overlay (screen-space lines + labels for crisp rendering at any zoom)
+    let contourLabelOverlayCanvas = null;
+    let contourLabelOverlayCtx = null;
+    let contourLabels = []; // [{lat, lon, text}]
+    let contourSegments = []; // [{ a:{lat,lon}, b:{lat,lon}, level }]
+
+    function ensureContourLabelOverlay() {
+      if (contourLabelOverlayCanvas || !map) return;
+      const c = document.createElement('canvas');
+      c.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:3;';
+      map.getContainer().appendChild(c);
+      contourLabelOverlayCanvas = c;
+      contourLabelOverlayCtx = c.getContext('2d');
+      resizeContourLabelOverlay();
+      window.addEventListener('resize', () => {
+        resizeContourLabelOverlay();
+        redrawContourLabels();
+      });
+      map.on('move', redrawContourLabels);
+      map.on('zoom', redrawContourLabels);
+      map.on('rotate', redrawContourLabels);
+      map.on('resize', () => {
+        resizeContourLabelOverlay();
+        redrawContourLabels();
+      });
+    }
+
+    function resizeContourLabelOverlay() {
+      if (!contourLabelOverlayCanvas || !map) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+      const cont = map.getContainer();
+      const w = cont.clientWidth;
+      const h = cont.clientHeight;
+      contourLabelOverlayCanvas.width = Math.max(1, Math.floor(w * dpr));
+      contourLabelOverlayCanvas.height = Math.max(1, Math.floor(h * dpr));
+      contourLabelOverlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function clearContourLabels() {
+      contourLabels = [];
+      contourSegments = [];
+      if (!contourLabelOverlayCtx || !contourLabelOverlayCanvas) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+      contourLabelOverlayCtx.clearRect(
+        0, 0,
+        contourLabelOverlayCanvas.width / dpr,
+        contourLabelOverlayCanvas.height / dpr
+      );
+    }
+
+    function redrawContourLabels() {
+      if (!contourLabelOverlayCtx || !contourLabelOverlayCanvas || !map) return;
+      const ctx = contourLabelOverlayCtx;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+      ctx.clearRect(0, 0, contourLabelOverlayCanvas.width / dpr, contourLabelOverlayCanvas.height / dpr);
+
+      const zoom = map.getZoom();
+      const bounds = map.getBounds();
+      const minLon = bounds.getWest();
+      const maxLon = bounds.getEast();
+      const minLat = bounds.getSouth();
+      const maxLat = bounds.getNorth();
+
+      // Draw contour lines in screen-space so they stay crisp and match the data ramp.
+      if (wantContours() && contourSegments.length) {
+        const linePx = Math.max(1.2, Math.min(3.0, 1.1 + (zoom - 2) * 0.22));
+        const haloPx = linePx + Math.max(1.2, Math.min(2.8, 1.2 + (zoom - 2) * 0.14));
+        const haloAlpha = 0.3;
+        const buckets = new Map();
+        for (const seg of contourSegments) {
+          if (
+            (seg.a.lon < minLon && seg.b.lon < minLon) ||
+            (seg.a.lon > maxLon && seg.b.lon > maxLon) ||
+            (seg.a.lat < minLat && seg.b.lat < minLat) ||
+            (seg.a.lat > maxLat && seg.b.lat > maxLat)
+          ) continue;
+          const colorKey = Number.isFinite(seg.level) ? seg.level.toFixed(4) : 'nan';
+          let group = buckets.get(colorKey);
+          if (!group) {
+            const css = colorScale(seg.level);
+            const c = d3.color(css);
+            const r = c ? Math.max(0, Math.round(c.r * 0.36)) : 18;
+            const g = c ? Math.max(0, Math.round(c.g * 0.36)) : 20;
+            const b = c ? Math.max(0, Math.round(c.b * 0.36)) : 28;
+            group = { color: `rgba(${r},${g},${b},0.96)`, segs: [] };
+            buckets.set(colorKey, group);
+          }
+          group.segs.push(seg);
+        }
+
+        ctx.save();
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        for (const group of buckets.values()) {
+          ctx.beginPath();
+          for (const seg of group.segs) {
+            const a = map.project([seg.a.lon, seg.a.lat]);
+            const b = map.project([seg.b.lon, seg.b.lat]);
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+          }
+          ctx.lineWidth = haloPx;
+          ctx.strokeStyle = `rgba(255,255,255,${haloAlpha})`;
+          ctx.stroke();
+          ctx.lineWidth = linePx;
+          ctx.strokeStyle = group.color;
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      if (!wantContourLabels() || !contourLabels.length) return;
+
+      const fontPx = Math.max(10, Math.min(16, 10 + (zoom - 3) * 0.7));
+      const strokePx = Math.max(2.2, Math.min(3.6, fontPx * 0.28));
+      ctx.font = `700 ${fontPx}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineJoin = 'round';
+
+      for (const label of contourLabels) {
+        if (label.lon < minLon || label.lon > maxLon || label.lat < minLat || label.lat > maxLat) continue;
+        const p = map.project([label.lon, label.lat]);
+        ctx.lineWidth = strokePx;
+        ctx.strokeStyle = 'rgba(8,14,28,0.78)';
+        ctx.strokeText(label.text, p.x, p.y);
+        ctx.fillStyle = 'rgba(255,255,255,0.97)';
+        ctx.fillText(label.text, p.x, p.y);
+      }
+    }
+
     function drawContoursOverlay(stepBase, nLat, nLon, ss) {
+      // Rebuild contours for the current frame only (avoid accumulation artifacts).
+      contourSegments = [];
       const nlev = 7;
       const levels = [];
       const span = dataMax - dataMin;
-      if (span <= 0 || !isFinite(span)) return;
+      if (span <= 0 || !isFinite(span)) {
+        clearContourLabels();
+        return;
+      }
 
       for (let k = 1; k < nlev; k++) {
         levels.push(dataMin + (span * k) / nlev);
       }
 
-      renderCtx.save();
-      renderCtx.strokeStyle = 'rgba(255,255,255,0.45)';
-      renderCtx.lineWidth = 1;
-      renderCtx.lineJoin = 'round';
+      const zoom = map ? map.getZoom() : 4;
+      const decimals = Math.max(0, Math.min(2, paramCfg().decimals || 0));
+      const showLabels = wantContourLabels();
+
+      let screenPerCanvasPx = 1;
+      if (map && sliceBounds) {
+        const nw = map.project([indexToLon(sliceBounds.lonStart), indexToLat(sliceBounds.latStart)]);
+        const ne = map.project([indexToLon(sliceBounds.lonStart + nLon), indexToLat(sliceBounds.latStart)]);
+        const sw = map.project([indexToLon(sliceBounds.lonStart), indexToLat(sliceBounds.latStart + nLat)]);
+        const se = map.project([indexToLon(sliceBounds.lonStart + nLon), indexToLat(sliceBounds.latStart + nLat)]);
+        const topW = Math.hypot(ne.x - nw.x, ne.y - nw.y);
+        const botW = Math.hypot(se.x - sw.x, se.y - sw.y);
+        const avgW = (topW + botW) * 0.5;
+        screenPerCanvasPx = Math.max(0.05, avgW / Math.max(1, (nLon - 1) * ss));
+      }
+
+      // Labels will be drawn on the screen-space overlay for crisp text at any
+      // zoom — here we just collect candidate positions in lat/lon space.
+      const screenLabelSpacingPx = (isMobile() ? 95 : 120) * Math.max(1, Math.min(2.8, 2.9 - (zoom - 2) * 0.22));
+      const collectedLabels = [];
 
       const gv = (ii, jj) => {
         const raw = getDisplayRawValue(stepBase, ii, jj, nLon);
@@ -1499,7 +1676,8 @@
       if (nLat * nLon > 48000) stride = 3;
 
       for (const L of levels) {
-        renderCtx.beginPath();
+        const labelText = showLabels && Number.isFinite(L) ? L.toFixed(decimals) : '';
+        const labelPoints = [];
         for (let i = 0; i < nLat - stride; i += stride) {
           for (let j = 0; j < nLon - stride; j += stride) {
             const v00 = gv(i, j);
@@ -1529,15 +1707,45 @@
               const pa = edges[ea];
               const pb = edges[eb];
               if (pa && pb) {
-                renderCtx.moveTo(pa.x, pa.y);
-                renderCtx.lineTo(pb.x, pb.y);
+                const aLon = indexToLon(sliceBounds.lonStart + pa.x / ss);
+                const aLat = indexToLat(sliceBounds.latStart + pa.y / ss);
+                const bLon = indexToLon(sliceBounds.lonStart + pb.x / ss);
+                const bLat = indexToLat(sliceBounds.latStart + pb.y / ss);
+                contourSegments.push({
+                  a: { lat: aLat, lon: aLon },
+                  b: { lat: bLat, lon: bLon },
+                  level: L,
+                });
+                if (labelText) {
+                  const mx = (pa.x + pb.x) * 0.5;
+                  const my = (pa.y + pb.y) * 0.5;
+                  let canPlace = true;
+                  for (let q = 0; q < labelPoints.length; q++) {
+                    const prev = labelPoints[q];
+                    const dScreen = Math.hypot(prev.x - mx, prev.y - my) * screenPerCanvasPx;
+                    if (dScreen < screenLabelSpacingPx) {
+                      canPlace = false;
+                      break;
+                    }
+                  }
+                  if (canPlace) labelPoints.push({ x: mx, y: my });
+                }
               }
             }
           }
         }
-        renderCtx.stroke();
+        if (labelText && labelPoints.length) {
+          for (const p of labelPoints) {
+            const lon = indexToLon(sliceBounds.lonStart + p.x / ss);
+            const lat = indexToLat(sliceBounds.latStart + p.y / ss);
+            collectedLabels.push({ lat, lon, text: labelText });
+          }
+        }
       }
-      renderCtx.restore();
+
+      contourLabels = collectedLabels;
+      ensureContourLabelOverlay();
+      redrawContourLabels();
     }
 
     // =======================================================================
@@ -1580,6 +1788,8 @@
 
       if (wantContours()) {
         drawContoursOverlay(stepBase, nLat, nLon, ss);
+      } else {
+        clearContourLabels();
       }
       const coordinates = [
         [indexToLon(lonStart), indexToLat(latStart)],

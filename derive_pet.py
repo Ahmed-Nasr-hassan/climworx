@@ -55,7 +55,8 @@ def make_r2_fs() -> s3fs.S3FileSystem:
 def deaccumulate_since_init(da: xr.DataArray) -> xr.DataArray:
     # ICON asob_s/athb_s are time-averaged since model start. Convert to the
     # period-mean flux over (t_prev, t] so downstream PET is a per-step rate.
-    steps = da["step"].astype("float64")
+    # Normalize step to hours so arithmetic remains stable and cheap.
+    steps = (da["step"] / np.timedelta64(1, "h")).astype("float32")
     prev_steps = steps.shift(step=1).fillna(0.0)
     dt = steps - prev_steps
     prev = da.shift(step=1).fillna(0.0)
@@ -76,7 +77,7 @@ def load_param(fs: s3fs.S3FileSystem, run_dt: str, param: str) -> xr.DataArray:
     if not fs.exists(root):
         raise FileNotFoundError(f"Missing parameter store: s3://{root}")
     store = s3fs.S3Map(root=root, s3=fs, check=False)
-    ds = xr.open_zarr(store, consolidated=True)
+    ds = xr.open_zarr(store, consolidated=True, chunks={"step": -1, "lat": CHUNK_LAT, "lon": CHUNK_LON})
     if param not in ds.data_vars:
         if len(ds.data_vars) == 1:
             only = list(ds.data_vars)[0]
@@ -200,6 +201,7 @@ def main() -> None:
     athb_inst = deaccumulate_since_init(loaded["athb_s"])
     log.info("De-accumulated asob_s/athb_s to per-step mean fluxes")
 
+    log.info("Computing PET from chunked source arrays")
     pet = compute_pet_pm(
         loaded["t_2m"],
         loaded["td_2m"],
@@ -209,6 +211,7 @@ def main() -> None:
         athb_inst,
         loaded["ps"],
     )
+    log.info("PET expression built; writing Zarr output")
     write_pet(fs, run_dt, pet)
     update_spatial_index(fs, run_dt)
     log.info("Done.")
