@@ -1,0 +1,55 @@
+name: Derive PET
+
+on:
+  workflow_run:
+    workflows: ["ICON Global ETL Pipeline"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_dt:
+        description: "Run datetime YYYYMMDDHH (optional, defaults to latest)"
+        required: false
+        type: string
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  derive-pet:
+    name: "Derive PET layer"
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install xarray zarr s3fs numcodecs numpy
+
+      - name: Derive PET from promoted run
+        env:
+          CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          RUN_DT:               ${{ inputs.run_dt }}
+        run: |
+          python derive_pet.py --run-dt "${RUN_DT:-}"
+
+      - name: Summary
+        if: success()
+        run: |
+          echo "### PET Derivation Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Output parameter: \`pet_pm\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Source layers: \`t_2m\`, \`td_2m\`, \`u_10m\`, \`v_10m\`, \`asob_s\`, \`athb_s\`, \`ps\`" >> "$GITHUB_STEP_SUMMARY"

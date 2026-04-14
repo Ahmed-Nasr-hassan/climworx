@@ -225,7 +225,9 @@ jobs:
           - td_2m
           - vmax_10m
           - asob_s
+          - athb_s
           - alhfl_s
+          - ps
           - runoff_s
           - runoff_g
       fail-fast: false   # Continue other parameters if one fails
@@ -345,7 +347,7 @@ jobs:
           RUN_DATE:             ${{ needs.resolve-run.outputs.run_date }}
           MODEL_RUN:            ${{ needs.resolve-run.outputs.model_run }}
         run: |
-          ALL_PARAMS="t_2m tot_prec u_10m v_10m pmsl clct relhum_2m aswdir_s td_2m vmax_10m asob_s alhfl_s runoff_s runoff_g"
+          ALL_PARAMS="t_2m tot_prec u_10m v_10m pmsl clct relhum_2m aswdir_s td_2m vmax_10m asob_s athb_s alhfl_s ps runoff_s runoff_g"
           python - <<'PY' "$RUN_DATE$MODEL_RUN" $ALL_PARAMS
           import os, sys, s3fs
           run_dt, *params = sys.argv[1:]
@@ -415,6 +417,6 @@ jobs:
           echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
           echo "| Run | \`${RUN_DATE}${MODEL_RUN}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Parameters | t_2m, tot_prec, u_10m, v_10m, pmsl, clct, relhum_2m, aswdir_s, td_2m, vmax_10m, asob_s, alhfl_s, runoff_s, runoff_g |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Parameters | t_2m, tot_prec, u_10m, v_10m, pmsl, clct, relhum_2m, aswdir_s, td_2m, vmax_10m, asob_s, athb_s, alhfl_s, ps, runoff_s, runoff_g |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Ensemble | ${{ env.ENABLE_ENSEMBLE }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Status | ✅ Promoted to /runs/ and /latest/ updated |" >> "$GITHUB_STEP_SUMMARY"

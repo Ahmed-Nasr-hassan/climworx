@@ -89,7 +89,9 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "td_2m":     (180.0, 320.0),        # K (dew point, always ≤ t_2m)
     "vmax_10m":  (0.0, 120.0),          # m/s (wind gust)
     "asob_s":    (-200.0, 1400.0),      # W/m² (net shortwave; negative at night)
+    "athb_s":    (-500.0, 300.0),       # W/m² (net longwave at surface; typically negative)
     "alhfl_s":   (-800.0, 800.0),       # W/m² (latent heat flux; strong evaporation can be < -600)
+    "ps":        (40000.0, 110000.0),   # Pa (surface pressure; ICON terrain peaks ~7 km → ~40 kPa)
     "runoff_s":  (0.0, 500.0),          # kg/m² (surface runoff, accumulated)
     "runoff_g":  (0.0, 500.0),          # kg/m² (subsurface/groundwater runoff, accumulated)
 }
@@ -316,6 +318,7 @@ WEIGHTS_MAP: dict[str, str] = {
     "tot_prec": "weights_conservative.nc",
     "aswdir_s": "weights_conservative.nc",
     "asob_s":   "weights_conservative.nc",
+    "athb_s":   "weights_conservative.nc",
     "alhfl_s":  "weights_conservative.nc",
     "runoff_s": "weights_conservative.nc",
     "runoff_g": "weights_conservative.nc",
