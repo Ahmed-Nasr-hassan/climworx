@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -652,14 +653,20 @@ def validate_one_param(
     #    Use dask-aware operations to avoid loading entire arrays into RAM
     #    (a single parameter can be ~1.6 GB as float32).
     bounds = PARAM_BOUNDS.get(param)
+    import dask
     for var in ds.data_vars:
         if ds[var].size == 0:
             raise ParamValidationError(param, f"[{param}/{var}] Data array is empty")
-        if bool(ds[var].isnull().all().compute()):
+        arr = ds[var]
+        # Single pass over the Zarr: compute all-NaN, min, max together.
+        all_nan, vmin, vmax = dask.compute(
+            arr.isnull().all(), arr.min(), arr.max()
+        )
+        if bool(all_nan):
             raise ParamValidationError(param, f"[{param}/{var}] All-NaN array")
         if bounds is not None:
-            vmin = float(ds[var].min().compute())
-            vmax = float(ds[var].max().compute())
+            vmin = float(vmin)
+            vmax = float(vmax)
             if vmin < bounds[0] or vmax > bounds[1]:
                 msg = (
                     f"[{param}/{var}] Values out of plausible range "
@@ -715,13 +722,22 @@ def validate_run_with_selective_retry(
     (same backoff as ``with_retry``), avoiding redundant work for parameters that already passed.
     """
     log.info("=== Validation: run=%s ===", run_dt)
+    max_workers = int(os.environ.get("VALIDATE_CONCURRENCY", "3"))
     start_idx = 0
     attempt = 0
     while True:
         attempt += 1
         try:
-            for i in range(start_idx, len(params)):
-                validate_one_param(run_dt, params[i], ensemble, fs, all_steps)
+            remaining = params[start_idx:]
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {
+                    pool.submit(
+                        validate_one_param, run_dt, p, ensemble, fs, all_steps
+                    ): p
+                    for p in remaining
+                }
+                for fut in as_completed(futures):
+                    fut.result()
             log.info("=== Validation PASSED ===")
             return
         except ParamValidationError as exc:
