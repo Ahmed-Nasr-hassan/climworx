@@ -57,6 +57,11 @@ jobs:
       run_date:  ${{ steps.detect.outputs.RUN_DATE }}
       image:     ${{ steps.image.outputs.IMAGE }}
     steps:
+      - name: Checkout (to inspect commit for Dockerfile changes)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
       - name: Resolve ETL image (pin to commit SHA for reproducibility)
         id: image
         env:
@@ -66,12 +71,28 @@ jobs:
           OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           REPO="ghcr.io/${OWNER_LC}/climworx-etl"
           SHA="${{ github.sha }}"
+
+          # Only probe for a SHA-tagged image if this commit actually triggered
+          # build-image.yml (i.e. touched Dockerfile or build-image.yml itself).
+          # Otherwise no SHA tag exists and we'd waste 5 min waiting.
+          if git show --name-only --format='' "$SHA" | grep -qE '^(Dockerfile|\.github/workflows/build-image\.yml)$'; then
+            BUILD_TRIGGERED=1
+          else
+            BUILD_TRIGGERED=0
+          fi
+
+          if [ "$BUILD_TRIGGERED" -eq 0 ]; then
+            IMAGE="${REPO}:latest"
+            echo "Commit ${SHA} did not touch Dockerfile — using ${IMAGE}"
+            echo "IMAGE=${IMAGE}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           IMAGE="${REPO}:${SHA}"
 
-          # Wait up to ~5 min for the SHA-tagged image to exist. This closes
-          # the race where a push triggers main.yml before build-image.yml
-          # finishes publishing. Falls back to :latest on timeout so scheduled
-          # runs on unchanged code still work (tag already exists immediately).
+          # Wait up to ~5 min for the SHA-tagged image to exist. Closes the
+          # race where a Dockerfile push triggers main.yml before
+          # build-image.yml finishes publishing.
           TOKEN=$(echo -n "${GH_TOKEN}" | base64)
           MANIFEST_URL="https://ghcr.io/v2/${OWNER_LC}/climworx-etl/manifests/${SHA}"
           found=0
