@@ -127,22 +127,22 @@ function parseAndValidate(url: URL): ParsedQuery | Response {
 async function resolveRunId(
   env: Env,
   runOverride: string | null,
+  forceRefresh = false,
 ): Promise<string> {
   if (runOverride) return runOverride;
 
   const now = Date.now();
-  if (cachedLatestRun && now - cachedLatestRun.fetchedAt < LATEST_RUN_TTL_MS) {
+  if (!forceRefresh && cachedLatestRun && now - cachedLatestRun.fetchedAt < LATEST_RUN_TTL_MS) {
     return cachedLatestRun.runId;
   }
 
-  // Try KV first (sub-ms)
-  let runId = await env.METADATA.get(LATEST_RUN_KEY);
+  // On forced refresh, skip KV (it may also be stale) and read R2 directly.
+  let runId: string | null = forceRefresh ? null : await env.METADATA.get(LATEST_RUN_KEY);
 
-  // Fall back to R2 object
   if (!runId) {
     const obj = await env.DATABANK.get("latest/_LATEST_RUN");
     if (!obj) throw new Error("No latest run found in R2");
-    runId = await obj.text();
+    runId = (await obj.text()).trim();
     await env.METADATA.put(LATEST_RUN_KEY, runId, { expirationTtl: 400 });
   }
 
@@ -416,8 +416,22 @@ async function handleZarrProxy(
     return jsonError(503, "No latest run available");
   }
 
-  const r2Key = `runs/${runId}/${param}/${objPath}`;
-  const obj = await env.DATABANK.get(r2Key);
+  let r2Key = `runs/${runId}/${param}/${objPath}`;
+  let obj = await env.DATABANK.get(r2Key);
+  // If the cached runId points to a run that was janitored after promotion,
+  // bust caches and retry once against the freshly-resolved runId.
+  if (!obj) {
+    try {
+      const freshRunId = await resolveRunId(env, null, true);
+      if (freshRunId !== runId) {
+        runId = freshRunId;
+        r2Key = `runs/${runId}/${param}/${objPath}`;
+        obj = await env.DATABANK.get(r2Key);
+      }
+    } catch {
+      // fall through to 404 below
+    }
+  }
   if (!obj) return jsonError(404, `Not found: ${r2Key}`);
 
   const isMetadata = /\.(zarray|zattrs|zmetadata|zgroup)$/.test(objPath);
@@ -525,8 +539,28 @@ export default {
         ensemble,
       );
     } catch (err) {
-      console.error("R2 fetch error:", err);
-      return jsonError(500, `Failed to retrieve data: ${(err as Error).message}`);
+      // If cached runId was janitored after promotion, refresh and retry once.
+      if (!runOverride) {
+        try {
+          const freshRunId = await resolveRunId(env, null, true);
+          if (freshRunId !== runId) {
+            runId = freshRunId;
+            body = await fetchFromR2(
+              env, runId, param, lat, lon,
+              chunkLat, chunkLon, localLat, localLon,
+              ensemble,
+            );
+          } else {
+            throw err;
+          }
+        } catch (retryErr) {
+          console.error("R2 fetch error:", retryErr);
+          return jsonError(500, `Failed to retrieve data: ${(retryErr as Error).message}`);
+        }
+      } else {
+        console.error("R2 fetch error:", err);
+        return jsonError(500, `Failed to retrieve data: ${(err as Error).message}`);
+      }
     }
 
     const finalResponse = new Response(JSON.stringify(body), {
