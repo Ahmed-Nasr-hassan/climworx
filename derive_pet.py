@@ -55,8 +55,12 @@ def make_r2_fs() -> s3fs.S3FileSystem:
 def deaccumulate_since_init(da: xr.DataArray) -> xr.DataArray:
     # ICON asob_s/athb_s are time-averaged since model start. Convert to the
     # period-mean flux over (t_prev, t] so downstream PET is a per-step rate.
-    # Normalize step to hours so arithmetic remains stable and cheap.
-    steps = (da["step"] / np.timedelta64(1, "h")).astype("float32")
+    # Step can be encoded either as timedelta64 or numeric forecast hour.
+    step_coord = da["step"]
+    if np.issubdtype(step_coord.dtype, np.timedelta64):
+        steps = (step_coord / np.timedelta64(1, "h")).astype("float32")
+    else:
+        steps = step_coord.astype("float32")
     prev_steps = steps.shift(step=1).fillna(0.0)
     dt = steps - prev_steps
     prev = da.shift(step=1).fillna(0.0)
