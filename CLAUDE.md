@@ -18,8 +18,14 @@ apt-get install cdo  # CDO >= 2.0
 # Run single parameter (staging phase)
 PARAMETER=tot_prec MODEL_RUN=00 python etl.py
 
-# Run validation + promotion (after all staged params are done)
+# Validation + promotion (copy staging→runs, cleanup staging). Does NOT flip /latest.
 MODEL_RUN=00 python etl.py --validate-only --params tot_prec t_2m
+
+# Derive PET into runs/{run}/pet_pm/ (requires t_2m, td_2m, u_10m, v_10m, asob_s, athb_s, ps already promoted)
+python derive_pet.py --run-dt 2026041500
+
+# Finalize: flip /latest, rebuild spatial_index, run janitor. Run AFTER derive_pet.py.
+MODEL_RUN=00 python etl.py --finalize --params tot_prec t_2m pet_pm
 
 # Run with ensemble members (40 members, ~40× more storage)
 PARAMETER=tot_prec MODEL_RUN=00 ENABLE_ENSEMBLE=true python etl.py
@@ -73,13 +79,17 @@ The `wrangler.toml` (not committed) must bind R2 as `DATABANK` and KV as `METADA
 
 ## Architecture
 
-### 3-Phase ETL Workflow
+### 4-Phase ETL Workflow
 
-1. **Staging** — `resolve_available_run()` probes DWD for the requested run and falls back to older runs (6h steps, up to 4 cycles back) if not yet published. Downloads GRIB2.bz2 for all forecast steps via `try_stream_download()` (returns `None` on 404, tolerating partially-published runs). Step-0 of accumulated fields (e.g. `tot_prec`) is a ~200-byte stub with no grid metadata — `regrid_grib_bytes()` detects files < 10,000 bytes and returns an all-zeros `_make_zeros_dataset()` instead. Full-size GRIBs are regridded from icosahedral → 0.125° lat/lon via `cdo remap,{target_grid},{weights}` using pre-computed weight files in `assets/`. Uploads concatenated Zarr to `s3://icon-global-databank/staging/{YYYYMMDDHH}/{param}/` with a `_SUCCESS` marker.
+Each phase is a separate GitHub Actions job (`etl` matrix → `promote` → `derive-pet` → `finalize`). The `/latest/_LATEST_RUN` pointer only flips at the very end, so the dashboard never sees a run with a partial set of layers — e.g. a run missing `pet_pm`.
 
-2. **Validation** — Checks all expected steps present (warns on missing, doesn't fail), arrays non-empty with no all-NaN slices, values within `PARAM_BOUNDS`, and Zarr metadata readable. Uses dask-lazy `.compute()` to avoid loading entire arrays into RAM (~1.6 GB per parameter). Retries with exponential backoff (max 3 attempts).
+1. **Staging** (`etl` matrix, one job per param) — `resolve_available_run()` probes DWD for the requested run and falls back to older runs (6h steps, up to 4 cycles back) if not yet published. Downloads GRIB2.bz2 for all forecast steps via `try_stream_download()` (returns `None` on 404, tolerating partially-published runs). Step-0 of accumulated fields (e.g. `tot_prec`) is a ~200-byte stub with no grid metadata — `regrid_grib_bytes()` detects files < 10,000 bytes and returns an all-zeros `_make_zeros_dataset()` instead. Full-size GRIBs are regridded from icosahedral → 0.125° lat/lon via `cdo remap,{target_grid},{weights}` using pre-computed weight files in `assets/`. Uploads concatenated Zarr to `s3://icon-global-databank/staging/{YYYYMMDDHH}/{param}/` with a `_SUCCESS` marker. When DWD fallback kicks in, an `_RESOLVED_RUN` marker is written under the *original* CI run_dt so downstream jobs can discover which run was actually staged.
 
-3. **Promotion + Janitor** — Copies staging → `/runs/{YYYYMMDDHH}/`, updates `/latest/_LATEST_RUN`, writes `spatial_index.json` (reads actual steps from promoted Zarr, not assumed catalog), then deletes runs and orphaned staging dirs older than `KEEP_RUNS`.
+2. **Validation + Promotion** (`promote` job, `etl.py --validate-only`) — Validation checks all expected steps present (warns on missing, doesn't fail), arrays non-empty with no all-NaN slices, values within `PARAM_BOUNDS`, and Zarr metadata readable. Uses dask-lazy `.compute()` to avoid loading entire arrays into RAM (~1.6 GB per parameter). Retries with exponential backoff (max 3 attempts). After validation, `promote_run()` copies `staging/{run}/{param}/` → `runs/{run}/{param}/`, writes `_SUCCESS` under the promoted path, and deletes the staging copy per-param (kills the duplicate-storage window). Partial per-param cleanup failures warn-and-continue; only if *all* params fail cleanup does the job fail (systemic auth/R2 issue). The `_RESOLVED_RUN` marker is intentionally left in staging for the later finalize job. Does NOT flip `/latest` or run janitor.
+
+3. **Derive PET** (`derive-pet` job, `derive_pet.py`) — Reads seven promoted params (`t_2m`, `td_2m`, `u_10m`, `v_10m`, `asob_s`, `athb_s`, `ps`) from `runs/{run}/`, computes FAO-56 Penman-Monteith PET (deaccumulating `asob_s`/`athb_s` to per-step fluxes first), and writes `runs/{run}/pet_pm/` with its own `_SUCCESS` marker. Honors `_RESOLVED_RUN` when `--run-dt` is passed. Does NOT touch `spatial_index.json` (finalize rebuilds it with `pet_pm` included).
+
+4. **Finalize + Janitor** (`finalize` job, `etl.py --finalize`) — Verifies every advertised param has `runs/{run}/{param}/_SUCCESS` (hard guard against out-of-band invocations), rebuilds `spatial_index.json` with `pet_pm` in the params list (reads actual steps from promoted Zarr), flips `/latest/_LATEST_RUN` to the new run, then runs janitor to delete runs and orphaned staging dirs older than `KEEP_RUNS`. `--validate-only` and `--finalize` are mutually exclusive in argparse.
 
 ### CDO Regridding
 
@@ -97,7 +107,7 @@ ICON GRIB2 files reference their native icosahedral grid only by UUID — CDO ca
 
 ### CI/CD
 
-GitHub Actions (`.github/workflows/main.yml`) runs 4×/day at 06:15, 12:15, 18:15, 00:15 UTC (~4h after each model init). Currently processing `tot_prec` and `t_2m`. Promotion only runs if all matrix ETL jobs succeed and validation passes (fails hard if >15% of expected steps are missing — catches partial DWD uploads).
+GitHub Actions (`.github/workflows/main.yml`) runs 4×/day at 06:15, 12:15, 18:15, 00:15 UTC (~4h after each model init). Matrix processes 16 params (see `.github/workflows/main.yml` `matrix.parameter`). Job dependency: `resolve-run` → `build-assets` → `etl` (matrix) → `promote` → `derive-pet` → `finalize`. Promote discovers successfully-staged params from R2 (_SUCCESS markers), so a single param failure doesn't block the rest. `derive-pet` and `finalize` run only if their predecessors succeeded — a PET failure keeps the dashboard pinned to the previous run instead of shipping a run without the PET layer.
 
 ### R2 Storage Layout
 
@@ -148,6 +158,6 @@ Single-file interactive dashboard using MapLibre GL JS, Tailwind CSS, D3 color s
 - **Grid:** 2879×1441 (0.125° resolution, north→south, west→east; `-180.0` to `179.875` longitude)
 - **CDO target grid:** xfirst=-180.0, xinc=0.125, xsize=2879; yfirst=90.0, yinc=-0.125, ysize=1441 (N→S)
 - **Forecast steps:** 97 total for 00Z/12Z (+0…+78h hourly, +81…+180h every 3h); 57 steps for 06Z/18Z (max +120h)
-- **Active parameters (CI):** `tot_prec`, `t_2m` (others: `u_10m`, `v_10m`, `pmsl`, `clct`, `relhum_2m`, `aswdir_s`)
+- **Active parameters (CI):** `t_2m`, `tot_prec`, `u_10m`, `v_10m`, `pmsl`, `clct`, `relhum_2m`, `aswdir_s`, `td_2m`, `vmax_10m`, `asob_s`, `athb_s`, `alhfl_s`, `ps`, `runoff_s`, `runoff_g`, plus derived `pet_pm` (FAO-56 Penman-Monteith, computed by `derive_pet.py` from `t_2m`, `td_2m`, `u_10m`, `v_10m`, `asob_s`, `athb_s`, `ps`)
 - **Chunk size:** 100×100 lat/lon pixels, full step dimension
 - **Compression:** GZip level 5 (`from numcodecs import GZip`) — native `DecompressionStream` in Worker, `pako.ungzip` in dashboard

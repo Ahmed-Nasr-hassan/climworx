@@ -772,9 +772,15 @@ def promote_run(
     params: list[str],
     fs: s3fs.S3FileSystem,
 ) -> None:
-    """Copy validated staging data to /runs/{run_dt}/ and update /latest/ pointer."""
+    """Move validated staging data to /runs/{run_dt}/.
+
+    Does NOT flip /latest/_LATEST_RUN — that happens in ``finalize_run`` after
+    downstream derivations (e.g. PET) have written their own layers, so the
+    dashboard never sees a run with a partial set of layers.
+    """
     log.info("=== Promoting run=%s ===", run_dt)
 
+    cleanup_failures: list[str] = []
     for param in params:
         src = f"{BUCKET}/staging/{run_dt}/{param}"
         dst = f"{BUCKET}/runs/{run_dt}/{param}"
@@ -785,13 +791,75 @@ def promote_run(
         with fs.open(f"{dst}/_SUCCESS", "w") as f:
             f.write(datetime.now(timezone.utc).isoformat())
 
-    # Update /latest/_LATEST_RUN pointer
+        # Delete staging copy now that runs/ holds the data — avoids the
+        # duplicate-storage window that used to last until the next janitor.
+        log.info("  Removing staged copy %s", src)
+        try:
+            fs.rm(src, recursive=True)
+        except Exception as exc:
+            log.warning("  Failed to remove staging %s: %s", src, exc)
+            cleanup_failures.append(param)
+
+    # Tolerate a flaky single-param cleanup (often a dataset-limit quirk) but
+    # fail loudly if *every* cleanup failed — that's a systemic issue (auth,
+    # permissions, R2 outage) and silently leaking a whole run's staging is
+    # the bug this change was meant to prevent.
+    if cleanup_failures and len(cleanup_failures) == len(params):
+        raise RuntimeError(
+            f"All {len(params)} staging cleanups failed for run={run_dt}; "
+            f"aborting to avoid silent storage drift. Params: {cleanup_failures}"
+        )
+    if cleanup_failures:
+        log.warning(
+            "Staging cleanup partially failed for run=%s: %d/%d params (%s) — "
+            "continuing; janitor will sweep leftovers next cycle.",
+            run_dt, len(cleanup_failures), len(params), cleanup_failures,
+        )
+
+    # Intentionally leave staging/{run_dt}/_RESOLVED_RUN in place so the later
+    # --finalize invocation can discover the resolved run id. Janitor sweeps
+    # the empty staging dir on the next cycle.
+    log.info("=== Promotion COMPLETE (pointer flip deferred to finalize) ===")
+
+
+def finalize_run(
+    run_dt: str,
+    params: list[str],
+    keep_runs: int,
+    fs: s3fs.S3FileSystem,
+) -> None:
+    """Flip /latest pointer, (re)build spatial_index, run janitor.
+
+    Called after promote_run AND any downstream derivations (PET, etc.) have
+    written under runs/{run_dt}/. ``params`` should include every layer the
+    dashboard expects (pet_pm included).
+    """
+    log.info("=== Finalizing run=%s ===", run_dt)
+
+    # Hard guard: every advertised param must have a _SUCCESS marker under
+    # runs/{run_dt}/{param}/. Protects out-of-band invocations (manual reruns,
+    # workflow_dispatch on finalize only, local `etl.py --finalize`) that
+    # bypass the workflow's `needs:` graph.
+    missing = [
+        p for p in params
+        if not fs.exists(f"{BUCKET}/runs/{run_dt}/{p}/_SUCCESS")
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Refusing to finalize run={run_dt}: missing _SUCCESS for "
+            f"{missing}. Promotion or derivation step did not complete."
+        )
+
+    # Build spatial_index first so it's in place the moment /latest flips.
+    build_spatial_index(run_dt, params, fs)
+
     latest_key = f"{BUCKET}/latest/_LATEST_RUN"
     with fs.open(latest_key, "w") as f:
         f.write(run_dt)
     log.info("Updated latest pointer: %s → %s", latest_key, run_dt)
 
-    log.info("=== Promotion COMPLETE ===")
+    run_janitor(run_dt, keep_runs, fs)
+    log.info("=== Finalize COMPLETE ===")
 
 
 # ---------------------------------------------------------------------------
@@ -926,15 +994,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--validate-only",
         action="store_true",
-        help="Run validation + promotion only (skip download/regrid)",
+        help="Run validation + promotion (copy staging→runs, cleanup staging). "
+             "Does NOT flip /latest or run janitor — use --finalize for that.",
+    )
+    p.add_argument(
+        "--finalize",
+        action="store_true",
+        help="Flip /latest pointer, rebuild spatial_index, run janitor. "
+             "Run after --validate-only and any derivations (e.g. derive_pet.py).",
     )
     p.add_argument(
         "--params",
         nargs="+",
         default=None,
-        help="Override parameter list for validation/promotion steps",
+        help="Override parameter list for validation/promotion/finalize steps",
     )
-    return p.parse_args()
+    args = p.parse_args()
+    if args.validate_only and args.finalize:
+        p.error(
+            "--validate-only and --finalize are mutually exclusive: the workflow "
+            "runs them as separate jobs with derive_pet.py in between."
+        )
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -965,9 +1046,10 @@ def main() -> None:
     fs = make_r2_fs()
 
     # ------------------------------------------------------------------
-    # Phase 1 & 2: Download → Regrid → Stage  (skip if --validate-only)
+    # Phase 1 & 2: Download → Regrid → Stage
+    # Skip when running --validate-only or --finalize.
     # ------------------------------------------------------------------
-    if not args.validate_only:
+    if not args.validate_only and not args.finalize:
         # Probe DWD and fall back to an older run if the requested one isn't published yet
         original_run_dt = run_dt
         resolved_run_dt = resolve_available_run(run_date, args.model_run, param, model)
@@ -1040,12 +1122,36 @@ def main() -> None:
 
         try:
             promote_run(run_dt, all_params, fs)
-            build_spatial_index(run_dt, all_params, fs)
-            run_janitor(run_dt, args.keep_runs, fs)
         except Exception as exc:
-            msg = f"PROMOTION/JANITOR FAILED | run={run_dt} | error={exc}"
+            msg = f"PROMOTION FAILED | run={run_dt} | error={exc}"
             log.exception(msg)
             cleanup_failed_run_data(run_dt, all_params, fs)
+            send_alert(msg)
+            sys.exit(1)
+
+        log.info("Promotion complete for run=%s (finalize pending)", run_dt)
+
+    # ------------------------------------------------------------------
+    # Phase 4: Finalize (flip /latest, rebuild spatial_index, janitor)
+    # Called as a separate invocation after derive_pet.py (and any other
+    # derivation steps) have written layers under runs/{run_dt}/.
+    # ------------------------------------------------------------------
+    if args.finalize:
+        all_params = args.params or list(PARAM_BOUNDS.keys())
+
+        resolved_key = f"{BUCKET}/staging/{run_dt}/_RESOLVED_RUN"
+        if fs.exists(resolved_key):
+            with fs.open(resolved_key) as f:
+                resolved = f.read().decode().strip()
+            if resolved != run_dt:
+                log.info("Finalize: resolved run_dt %s → %s", run_dt, resolved)
+                run_dt = resolved
+
+        try:
+            finalize_run(run_dt, all_params, args.keep_runs, fs)
+        except Exception as exc:
+            msg = f"FINALIZE FAILED | run={run_dt} | error={exc}"
+            log.exception(msg)
             send_alert(msg)
             sys.exit(1)
 

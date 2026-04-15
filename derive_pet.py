@@ -14,7 +14,6 @@ Writes:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import time
@@ -113,6 +112,14 @@ def load_param(fs: s3fs.S3FileSystem, run_dt: str, param: str) -> xr.DataArray:
 
 def resolve_run_dt(fs: s3fs.S3FileSystem, run_dt: str | None) -> str:
     if run_dt:
+        # Honor DWD-fallback redirect written during staging.
+        resolved_key = f"{BUCKET}/staging/{run_dt}/_RESOLVED_RUN"
+        if fs.exists(resolved_key):
+            with fs.open(resolved_key, "r") as f:
+                resolved = f.read().strip()
+            if resolved and resolved != run_dt:
+                log.info("Resolved run_dt %s → %s (via _RESOLVED_RUN)", run_dt, resolved)
+                return resolved
         return run_dt
     latest_key = f"{BUCKET}/latest/_LATEST_RUN"
     with fs.open(latest_key, "r") as f:
@@ -204,30 +211,6 @@ def write_pet(fs: s3fs.S3FileSystem, run_dt: str, pet: xr.DataArray) -> None:
     log.info("PET written: s3://%s", zarr_path)
 
 
-def update_spatial_index(fs: s3fs.S3FileSystem, run_dt: str) -> None:
-    key = f"{BUCKET}/spatial_index.json"
-    if fs.exists(key):
-        with fs.open(key, "r") as f:
-            idx = json.load(f)
-    else:
-        idx = {"run": run_dt, "params": []}
-        log.info("spatial_index.json missing; creating a new one for run=%s", run_dt)
-
-    if idx.get("run") != run_dt:
-        log.warning("spatial_index run=%s differs from target run=%s; leaving unchanged", idx.get("run"), run_dt)
-        return
-
-    params = idx.get("params", [])
-    if "pet_pm" not in params:
-        params.append("pet_pm")
-        idx["params"] = params
-        with fs.open(key, "w") as f:
-            json.dump(idx, f)
-        log.info("spatial_index.json updated with pet_pm")
-    else:
-        log.info("spatial_index.json already includes pet_pm")
-
-
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Derive PET from promoted ICON run")
     p.add_argument("--run-dt", default=os.environ.get("RUN_DT"), help="YYYYMMDDHH (default: latest)")
@@ -262,7 +245,7 @@ def main() -> None:
     )
     log.info("PET expression built; writing Zarr output")
     write_pet(fs, run_dt, pet)
-    update_spatial_index(fs, run_dt)
+    # spatial_index.json is rebuilt by etl.py --finalize (includes pet_pm).
     log.info("Done in %.1fs", time.monotonic() - t_start)
 
 

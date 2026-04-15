@@ -347,10 +347,12 @@ jobs:
           if-no-files-found: ignore
 
   # =========================================================================
-  # Job 2: Validate + Promote + Janitor (runs after ALL matrix jobs succeed)
+  # Job 2: Validate + Promote staging → runs/ (NO pointer flip, NO janitor)
   # =========================================================================
   promote:
-    name: "Validate · Promote · Janitor · ${{ needs.resolve-run.outputs.model_run }}Z"
+    name: "Validate · Promote · ${{ needs.resolve-run.outputs.model_run }}Z"
+    outputs:
+      params: ${{ steps.discover.outputs.params }}
     needs:
       - resolve-run
       - etl
@@ -447,17 +449,134 @@ jobs:
                -H "Content-Type: application/json" \
                -d "{\"text\": \"$MESSAGE\"}" || true
 
-      - name: Summary
-        if: success()
+  # =========================================================================
+  # Job 3: Derive PET (FAO-56 Penman-Monteith) into runs/{run_dt}/pet_pm/
+  # Runs BEFORE finalize so the /latest pointer never points at a run that
+  # is missing the PET layer.
+  # =========================================================================
+  derive-pet:
+    name: "Derive PET · ${{ needs.resolve-run.outputs.model_run }}Z"
+    needs: [resolve-run, promote]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.resolve-run.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    if: needs.promote.result == 'success'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve actually-staged run_dt
+        id: resolve
+        env:
+          CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CI_RUN_DT:            ${{ needs.resolve-run.outputs.run_date }}${{ needs.resolve-run.outputs.model_run }}
+        run: |
+          python - <<'PY'
+          import os, s3fs
+          ci = os.environ["CI_RUN_DT"]
+          fs = s3fs.S3FileSystem(
+              key=os.environ["R2_ACCESS_KEY_ID"],
+              secret=os.environ["R2_SECRET_ACCESS_KEY"],
+              client_kwargs={"endpoint_url": f"https://{os.environ['CF_ACCOUNT_ID']}.r2.cloudflarestorage.com"},
+          )
+          marker = f"icon-global-databank/staging/{ci}/_RESOLVED_RUN"
+          resolved = ci
+          if fs.exists(marker):
+              with fs.open(marker) as f:
+                  resolved = f.read().decode().strip() or ci
+          print(f"resolved={resolved}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"run_dt={resolved}\n")
+          PY
+
+      - name: Run derive_pet.py
+        env:
+          RUN_DT: ${{ steps.resolve.outputs.run_dt }}
+        run: |
+          python derive_pet.py --run-dt "$RUN_DT"
+
+      - name: Alert on PET failure
+        if: failure()
         env:
           MODEL_RUN: ${{ needs.resolve-run.outputs.model_run }}
           RUN_DATE:  ${{ needs.resolve-run.outputs.run_date }}
         run: |
-          echo "### ETL Pipeline Complete" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Run | \`${RUN_DATE}${MODEL_RUN}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Parameters | t_2m, tot_prec, u_10m, v_10m, pmsl, clct, relhum_2m, aswdir_s, td_2m, vmax_10m, asob_s, athb_s, alhfl_s, ps, runoff_s, runoff_g |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Ensemble | ${{ env.ENABLE_ENSEMBLE }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Status | ✅ Promoted to /runs/ and /latest/ updated |" >> "$GITHUB_STEP_SUMMARY"
+          MESSAGE="ICON ETL FAILED | run=${RUN_DATE}${MODEL_RUN} | step=derive_pet | repo=${{ github.repository }} | run_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "$ALERT_WEBHOOK_URL" \
+               -H "Content-Type: application/json" \
+               -d "{\"text\": \"$MESSAGE\"}" || true
+
+  # =========================================================================
+  # Job 4: Finalize — flip /latest, rebuild spatial_index (incl. pet_pm),
+  # run janitor. Only here does the public dashboard move to the new run.
+  # =========================================================================
+  finalize:
+    name: "Finalize · ${{ needs.resolve-run.outputs.model_run }}Z"
+    needs: [resolve-run, promote, derive-pet]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.resolve-run.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    if: needs.promote.result == 'success' && needs.derive-pet.result == 'success'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Flip /latest + spatial_index + janitor
+        env:
+          MODEL_RUN:      ${{ needs.resolve-run.outputs.model_run }}
+          RUN_DATE:       ${{ needs.resolve-run.outputs.run_date }}
+          PROMOTE_PARAMS: ${{ needs.promote.outputs.params }}
+        run: |
+          ENSEMBLE_FLAG=""
+          if [ "$ENABLE_ENSEMBLE" = "true" ]; then
+            ENSEMBLE_FLAG="--ensemble"
+          fi
+          # Include pet_pm in params so spatial_index.json advertises it.
+          python etl.py \
+            --model-run "$MODEL_RUN" \
+            --run-date  "$RUN_DATE"  \
+            --keep-runs "$KEEP_RUNS" \
+            --finalize \
+            --params $PROMOTE_PARAMS pet_pm \
+            $ENSEMBLE_FLAG
+
+      - name: Alert on finalize failure
+        if: failure()
+        env:
+          MODEL_RUN: ${{ needs.resolve-run.outputs.model_run }}
+          RUN_DATE:  ${{ needs.resolve-run.outputs.run_date }}
+        run: |
+          MESSAGE="ICON ETL FAILED | run=${RUN_DATE}${MODEL_RUN} | step=finalize | repo=${{ github.repository }} | run_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -s -X POST "$ALERT_WEBHOOK_URL" \
+               -H "Content-Type: application/json" \
+               -d "{\"text\": \"$MESSAGE\"}" || true
+
+      - name: Summary
+        if: success()
+        env:
+          MODEL_RUN:      ${{ needs.resolve-run.outputs.model_run }}
+          RUN_DATE:       ${{ needs.resolve-run.outputs.run_date }}
+          PROMOTE_PARAMS: ${{ needs.promote.outputs.params }}
+        run: |
+          # Reflect only params that actually promoted (+ pet_pm, derived here).
+          PARAMS_CSV=$(echo "$PROMOTE_PARAMS pet_pm" | tr ' ' ',' | sed 's/,,*/, /g; s/,/, /g')
+          {
+            echo "### ETL Pipeline Complete"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Run | \`${RUN_DATE}${MODEL_RUN}\` |"
+            echo "| Parameters | ${PARAMS_CSV} |"
+            echo "| Ensemble | ${{ env.ENABLE_ENSEMBLE }} |"
+            echo "| Status | ✅ Promoted + PET derived + /latest updated |"
+          } >> "$GITHUB_STEP_SUMMARY"
