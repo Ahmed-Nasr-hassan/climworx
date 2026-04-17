@@ -32,6 +32,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -179,12 +180,19 @@ def cleanup_failed_run_data(run_dt: str, params: list[str], fs: s3fs.S3FileSyste
 
 
 def with_retry(fn, *args, label: str = "", **kwargs):
-    """Call fn(*args, **kwargs) with up to MAX_RETRIES, exponential backoff."""
+    """Call fn(*args, **kwargs) with up to MAX_RETRIES, exponential backoff.
+
+    If the exception is a ``RateLimitError`` with a ``retry_after`` value,
+    that value is used as the wait time instead of the default backoff.
+    """
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             return fn(*args, **kwargs)
         except Exception as exc:
             wait = min(RETRY_BASE_S * (2 ** (attempt - 1)), RETRY_MAX_S)
+            # Respect Retry-After from DWD 429 responses
+            if isinstance(exc, RateLimitError) and exc.retry_after is not None:
+                wait = min(exc.retry_after, RETRY_MAX_S)
             if attempt == MAX_RETRIES:
                 log.error("[%s] All %d attempts failed: %s", label, MAX_RETRIES, exc)
                 raise
@@ -283,10 +291,37 @@ def build_urls(model: str, run_dt: str, param: str, step: int) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+class RateLimitError(IOError):
+    """DWD returned 429 — caller should back off and retry."""
+
+    def __init__(self, url: str, retry_after: float | None = None) -> None:
+        self.retry_after = retry_after
+        super().__init__(
+            f"DWD rate-limited (429) on {url}"
+            + (f" — Retry-After: {retry_after}s" if retry_after else "")
+        )
+
+
+def _parse_retry_after_header(resp: requests.Response) -> float | None:
+    val = resp.headers.get("Retry-After")
+    if val is None:
+        return None
+    try:
+        return max(float(val), 1.0)
+    except (ValueError, TypeError):
+        return None
+
+
 def stream_download(url: str) -> bytes:
-    """Stream-download a .bz2 file and return decompressed bytes."""
+    """Stream-download a .bz2 file and return decompressed bytes.
+
+    Raises ``RateLimitError`` on HTTP 429 so that ``with_retry`` honours
+    the backoff instead of treating it as an opaque failure.
+    """
     log.debug("Downloading %s", url)
     with requests.get(url, stream=True, timeout=120) as resp:
+        if resp.status_code == 429:
+            raise RateLimitError(url, _parse_retry_after_header(resp))
         resp.raise_for_status()
         compressed = b"".join(resp.iter_content(chunk_size=1 << 20))
     return bz2.decompress(compressed)
@@ -295,13 +330,16 @@ def stream_download(url: str) -> bytes:
 def try_stream_download(url: str) -> bytes | None:
     """
     Like stream_download, but return None on HTTP 404 (file not on DWD).
-    Raises on other HTTP errors and on network failures (for use with with_retry).
+    Raises ``RateLimitError`` on 429, and other HTTP/network errors for use
+    with ``with_retry``.
     """
     log.debug("Downloading %s", url)
     with requests.get(url, stream=True, timeout=120) as resp:
         if resp.status_code == 404:
             log.warning("DWD 404 — skipping step file: %s", url)
             return None
+        if resp.status_code == 429:
+            raise RateLimitError(url, _parse_retry_after_header(resp))
         resp.raise_for_status()
         compressed = b"".join(resp.iter_content(chunk_size=1 << 20))
     return bz2.decompress(compressed)
@@ -457,32 +495,98 @@ def make_chunks(ensemble: bool) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
+DOWNLOAD_WORKERS = 6       # parallel GRIB download threads per matrix job
+DOWNLOAD_INTERVAL = 0.15   # seconds between request starts (throttle)
+
+
+def download_all_steps(
+    run_dt: str,
+    param: str,
+    steps: list[int],
+    model: str = "icon",
+) -> dict[int, bytes | None]:
+    """
+    Download + bz2-decompress all GRIB files for *param* in parallel.
+
+    Returns {step: decompressed_bytes} for steps that exist on DWD, and
+    {step: None} for 404s.  All bytes are held in memory (not disk) since a
+    single param's GRIBs fit comfortably (~2-4 GB for 97 steps).
+
+    This is the core of the "download-first" pattern: by the time regridding
+    starts, every available file is already local and immune to DWD rotation.
+
+    Rate-limiting: a shared lock + ``DOWNLOAD_INTERVAL`` sleep serializes
+    request *starts* so we don't stampede DWD.  ``with_retry`` provides
+    exponential backoff on failures, and honours ``Retry-After`` on 429s.
+    """
+    results: dict[int, bytes | None] = {}
+    throttle = threading.Lock()
+
+    def _download_one(step: int) -> tuple[int, bytes | None]:
+        # Serialize the start of each HTTP request to stay polite to DWD
+        with throttle:
+            time.sleep(DOWNLOAD_INTERVAL)
+        urls = build_urls(model, run_dt, param, step)
+        url = urls[0]
+        raw = with_retry(try_stream_download, url, label=f"dl/{param}/step={step}")
+        return step, raw
+
+    log.info("[download] %s: fetching %d steps with %d workers …", param, len(steps), DOWNLOAD_WORKERS)
+    t0 = time.monotonic()
+
+    with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
+        futures = {pool.submit(_download_one, s): s for s in steps}
+        done = 0
+        for fut in as_completed(futures):
+            step, raw = fut.result()
+            results[step] = raw
+            done += 1
+            if done % 20 == 0:
+                log.info("[download] %s: %d / %d steps fetched", param, done, len(steps))
+
+    available = sum(1 for v in results.values() if v is not None)
+    elapsed = time.monotonic() - t0
+    log.info(
+        "[download] %s: done in %.1fs — %d available, %d missing (404)",
+        param, elapsed, available, len(results) - available,
+    )
+    return results
+
+
 def process_deterministic(
     run_dt: str,
     param: str,
     fs: s3fs.S3FileSystem,
     all_steps: list[int],
+    available_steps: list[int] | None = None,
 ) -> xr.Dataset:
     """
     Download + regrid all forecast steps for a deterministic (ICON Global) run.
     Returns a concatenated xr.Dataset with a 'step' dimension.
+
+    Uses download-first pattern: all GRIBs are fetched in parallel before any
+    regridding begins, so mid-pipeline DWD file rotation cannot cause failures.
+
+    If *available_steps* is provided (from probe manifest), only those steps
+    are downloaded — known-missing steps are skipped without hitting DWD.
     """
+    steps_to_fetch = available_steps if available_steps is not None else all_steps
+
+    # Phase 1: download all GRIBs in parallel
+    downloaded = download_all_steps(run_dt, param, steps_to_fetch, model="icon")
+
+    # Phase 2: regrid from downloaded bytes (sequential — CDO is CPU-bound)
     step_datasets: list[xr.Dataset] = []
+    for step in sorted(downloaded):
+        raw = downloaded[step]
+        if raw is None:
+            continue
 
-    for step in all_steps:
-        urls = build_urls("icon", run_dt, param, step)
-        url = urls[0]
-
-        def _fetch_and_regrid(u=url, p=param, s=step):
-            raw = try_stream_download(u)
-            if raw is None:
-                return None
-            ds = regrid_grib_bytes(raw, p)
+        def _regrid(r=raw, p=param, s=step):
+            ds = regrid_grib_bytes(r, p)
             return ds.expand_dims({"step": [s]})
 
-        ds_step = with_retry(_fetch_and_regrid, label=f"{param}/step={step}")
-        if ds_step is None:
-            continue
+        ds_step = with_retry(_regrid, label=f"regrid/{param}/step={step}")
         step_datasets.append(ds_step)
         log.info("  [det] %s step=%d regridded (%d vars)", param, step, len(ds_step.data_vars))
 
@@ -499,30 +603,44 @@ def process_ensemble(
     param: str,
     fs: s3fs.S3FileSystem,
     all_steps: list[int],
+    available_steps: list[int] | None = None,
 ) -> xr.Dataset:
     """
     Download + regrid all 40 ensemble members across all forecast steps.
     Returns an xr.Dataset with dimensions (step, realization, latitude, longitude).
+
+    Uses download-first pattern for member-0 to probe which steps exist, then
+    downloads remaining members in parallel per step.
     """
+    steps_to_fetch = available_steps if available_steps is not None else all_steps
+
     member_datasets: list[xr.Dataset] = []
     member_step_lists: list[list[xr.Dataset]] = [[] for _ in range(ENSEMBLE_MEMBERS)]
 
-    for step in all_steps:
-        urls = build_urls("icon-eps", run_dt, param, step)
-        first_raw = try_stream_download(urls[0])
-        if first_raw is None:
-            log.warning(
-                "  [eps] %s step=%d — not on DWD, skipping for all members", param, step
-            )
-            continue
+    # Phase 1: download member-0 for all steps in parallel (probes availability)
+    member0_downloaded = download_all_steps(run_dt, param, steps_to_fetch, model="icon-eps")
+    valid_steps = sorted(s for s, raw in member0_downloaded.items() if raw is not None)
 
-        for member_idx in range(ENSEMBLE_MEMBERS):
+    log.info("[eps] %s: %d / %d steps have member-0 on DWD", param, len(valid_steps), len(steps_to_fetch))
+
+    for step in valid_steps:
+        urls = build_urls("icon-eps", run_dt, param, step)
+        first_raw = member0_downloaded[step]
+
+        # Regrid member-0 from cached bytes
+        ds0 = with_retry(
+            lambda r=first_raw, p=param, s=step: regrid_grib_bytes(r, p).expand_dims({"step": [s]}),
+            label=f"eps/{param}/mbr=0/step={step}",
+        )
+        member_step_lists[0].append(ds0)
+
+        # Download + regrid remaining members
+        for member_idx in range(1, ENSEMBLE_MEMBERS):
             url_m = urls[member_idx]
-            fr = first_raw
             mid = member_idx
 
-            def _fetch(u=url_m, p=param, s=step, first=fr, m=mid):
-                raw = first if m == 0 else stream_download(u)
+            def _fetch(u=url_m, p=param, s=step, m=mid):
+                raw = stream_download(u)
                 return regrid_grib_bytes(raw, p).expand_dims({"step": [s]})
 
             ds_step = with_retry(
@@ -1009,6 +1127,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override parameter list for validation/promotion/finalize steps",
     )
+    p.add_argument(
+        "--manifest",
+        default=None,
+        help="Path to probe manifest JSON (from probe_dwd.py). "
+             "Tells the ETL which steps are available, skipping known-missing.",
+    )
     args = p.parse_args()
     if args.validate_only and args.finalize:
         p.error(
@@ -1058,12 +1182,28 @@ def main() -> None:
             run_dt = resolved_run_dt
             all_steps = get_all_steps(run_dt[8:10])
 
+        # Load probe manifest (from probe_dwd.py) to skip known-missing steps
+        available_steps: list[int] | None = None
+        if args.manifest:
+            with open(args.manifest) as mf:
+                manifest = json.load(mf)
+            param_info = manifest.get("params", {}).get(param)
+            if param_info:
+                available_steps = sorted(param_info["available"])
+                log.info(
+                    "Manifest: %s has %d / %d available steps (skipping %d known-missing)",
+                    param, len(available_steps), len(all_steps),
+                    len(param_info.get("missing", [])),
+                )
+            else:
+                log.warning("Manifest has no entry for %s — downloading all steps", param)
+
         try:
             t0 = time.monotonic()
             if ensemble:
-                ds = process_ensemble(run_dt, param, fs, all_steps)
+                ds = process_ensemble(run_dt, param, fs, all_steps, available_steps)
             else:
-                ds = process_deterministic(run_dt, param, fs, all_steps)
+                ds = process_deterministic(run_dt, param, fs, all_steps, available_steps)
 
             staging_path = upload_to_staging(ds, run_dt, param, ensemble, fs)
 

@@ -3,10 +3,10 @@ name: ICON Global Weather ETL
 on:
   schedule:
     # 4 daily runs — ~5h after model init, giving ~2h buffer after DWD publishes (~04–05Z/10–11Z/…)
-    - cron: "15 7  * * *"   # 00Z model run  (init 00Z, DWD done ~04–05Z, trigger 07:15Z)
-    - cron: "15 13 * * *"   # 06Z model run  (init 06Z, DWD done ~10–11Z, trigger 13:15Z)
-    - cron: "15 19 * * *"   # 12Z model run  (init 12Z, DWD done ~16–17Z, trigger 19:15Z)
-    - cron: "15 1  * * *"   # 18Z model run  (init 18Z, DWD done ~22–23Z, trigger 01:15Z)
+    - cron: "15 3  * * *"   # 00Z model run  (init 00Z, DWD done ~04–05Z, trigger 07:15Z)
+    - cron: "15 9 * * *"   # 06Z model run  (init 06Z, DWD done ~10–11Z, trigger 13:15Z)
+    - cron: "15 13 * * *"   # 12Z model run  (init 12Z, DWD done ~16–17Z, trigger 19:15Z)
+    - cron: "15 19  * * *"   # 18Z model run  (init 18Z, DWD done ~22–23Z, trigger 01:15Z)
   workflow_dispatch:
     inputs:
       model_run:
@@ -270,11 +270,49 @@ jobs:
           retention-days: 1
 
   # =========================================================================
-  # Job 1: ETL — runs in parallel across all parameters (matrix)
+  # Job 1b: Probe DWD availability for all params × steps (~30-60s).
+  # Outputs a manifest.json so matrix jobs know upfront which steps exist
+  # and skip known-missing files without hitting DWD.  Also fails fast if
+  # any critical parameter has too many missing steps.
+  # =========================================================================
+  probe:
+    name: "Probe DWD · ${{ needs.resolve-run.outputs.model_run }}Z"
+    needs: [resolve-run]
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.resolve-run.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Probe all params × steps
+        env:
+          RUN_DATE:  ${{ needs.resolve-run.outputs.run_date }}
+          MODEL_RUN: ${{ needs.resolve-run.outputs.model_run }}
+        run: |
+          python probe_dwd.py \
+            --run-dt "${RUN_DATE}${MODEL_RUN}" \
+            --params t_2m tot_prec u_10m v_10m pmsl clct relhum_2m aswdir_s \
+                     td_2m vmax_10m asob_s athb_s alhfl_s ps runoff_s runoff_g \
+            --output manifest.json
+
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dwd-manifest
+          path: manifest.json
+          retention-days: 1
+
+  # =========================================================================
+  # Job 2: ETL — runs in parallel across all parameters (matrix)
   # =========================================================================
   etl:
     name: "ETL · ${{ matrix.parameter }} · ${{ needs.resolve-run.outputs.model_run }}Z"
-    needs: [resolve-run, build-assets]
+    needs: [resolve-run, build-assets, probe]
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.resolve-run.outputs.image }}
@@ -314,7 +352,13 @@ jobs:
           name: cdo-remap-assets
           path: assets/
 
-      - name: Run ETL (download → regrid → stage)
+      - name: Download DWD probe manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: dwd-manifest
+          path: .
+
+      - name: Run ETL (download-first → regrid → stage)
         env:
           PARAMETER:   ${{ matrix.parameter }}
           MODEL_RUN:   ${{ needs.resolve-run.outputs.model_run }}
@@ -328,11 +372,17 @@ jobs:
             ENSEMBLE_FLAG="--ensemble"
           fi
 
+          MANIFEST_FLAG=""
+          if [ -f manifest.json ]; then
+            MANIFEST_FLAG="--manifest manifest.json"
+          fi
+
           python etl.py \
             --parameter "$PARAMETER" \
             --model-run "$MODEL_RUN" \
             --run-date  "$RUN_DATE"  \
-            $ENSEMBLE_FLAG
+            $ENSEMBLE_FLAG \
+            $MANIFEST_FLAG
 
           END=$(date -u +%s)
           echo "::endgroup::"
@@ -347,7 +397,7 @@ jobs:
           if-no-files-found: ignore
 
   # =========================================================================
-  # Job 2: Validate + Promote staging → runs/ (NO pointer flip, NO janitor)
+  # Job 3: Validate + Promote staging → runs/ (NO pointer flip, NO janitor)
   # =========================================================================
   promote:
     name: "Validate · Promote · ${{ needs.resolve-run.outputs.model_run }}Z"
@@ -450,7 +500,7 @@ jobs:
                -d "{\"text\": \"$MESSAGE\"}" || true
 
   # =========================================================================
-  # Job 3: Derive PET (FAO-56 Penman-Monteith) into runs/{run_dt}/pet_pm/
+  # Job 4: Derive PET (FAO-56 Penman-Monteith) into runs/{run_dt}/pet_pm/
   # Runs BEFORE finalize so the /latest pointer never points at a run that
   # is missing the PET layer.
   # =========================================================================
@@ -513,7 +563,7 @@ jobs:
                -d "{\"text\": \"$MESSAGE\"}" || true
 
   # =========================================================================
-  # Job 4: Finalize — flip /latest, rebuild spatial_index (incl. pet_pm),
+  # Job 5: Finalize — flip /latest, rebuild spatial_index (incl. pet_pm),
   # run janitor. Only here does the public dashboard move to the new run.
   # =========================================================================
   finalize:
