@@ -146,6 +146,20 @@
     .sparkline { display: inline-block; vertical-align: middle; }
     /* Parameter dropdown: dark background for the OS-rendered option list */
     #param-select option { background: #1a1a2e; color: rgba(255,255,255,0.9); }
+    #param-select optgroup { background: #1a1a2e; color: rgba(255,255,255,0.55); font-weight: 600; font-size: 0.7rem; }
+    /* Loading bar: disable width transition while resetting (avoids shrink flash between loads) */
+    #loading-progress-bar.progress-bar-instant {
+      transition: none !important;
+    }
+    /* First-time draw tools: soft pulse on primary FAB until dismissed or user starts drawing */
+    @keyframes draw-fab-attn {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(129, 140, 248, 0.45); }
+      55% { box-shadow: 0 0 0 12px rgba(129, 140, 248, 0); }
+    }
+    #draw-tools-stack.draw-tools-attn #btn-draw {
+      animation: draw-fab-attn 2.2s ease-out infinite;
+    }
+    #draw-hint-card { animation: toast-in 0.35s ease-out; }
   </style>
 </head>
 
@@ -214,19 +228,6 @@
       </div>
     </div>
 
-    <!-- Draw area (toggle: click again to cancel) -->
-    <button type="button" id="btn-draw" aria-pressed="false"
-            class="w-full py-2.5 rounded-xl text-sm font-medium bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/30 transition-all"
-            onclick="toggleDrawArea()">
-      <svg class="inline w-4 h-4 mr-1 -mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg>
-      <span id="btn-draw-label">Draw area</span>
-    </button>
-    <button type="button"
-            class="w-full mt-2 py-2 rounded-xl text-xs font-medium bg-white/10 text-white/80 border border-white/15 hover:bg-white/15 transition-all"
-            onclick="clearDrawing()">
-      Clear
-    </button>
-
     <!-- Layer appearance -->
     <div class="space-y-2 pt-2 border-t border-white/10">
       <div>
@@ -294,17 +295,62 @@
     <div id="area-info" class="text-xs text-white/40 hidden"></div>
   </div>
 
-  <!-- ====== Clock / Timestamp (top-right) ====== -->
-  <div id="clock" class="glass absolute top-2 right-[calc(var(--top-ui-gap-mobile)+var(--compass-size-mobile)+var(--top-row-gap-mobile))] sm:top-4 sm:right-[calc(var(--top-ui-gap-desktop)+var(--compass-size-desktop)+var(--top-row-gap-desktop))] z-30 rounded-2xl px-3 py-2 sm:px-5 sm:py-3 text-right shadow-2xl hidden max-w-[45vw]">
-    <div id="clock-time" class="text-sm sm:text-lg font-semibold tracking-tight truncate"></div>
-    <div id="clock-meta" class="text-xs text-white/50 font-mono mt-0.5"></div>
+  <!-- ====== Clock / Timestamp (top-right; drops below compass on mobile to avoid truncation) ====== -->
+  <div id="clock" class="glass absolute top-14 right-2 sm:top-4 sm:right-[calc(var(--top-ui-gap-desktop)+var(--compass-size-desktop)+var(--top-row-gap-desktop))] z-30 rounded-2xl px-3 py-2 sm:px-5 sm:py-3 text-right shadow-2xl hidden max-w-[min(70vw,20rem)] sm:max-w-[45vw]">
+    <div id="clock-time" class="text-sm sm:text-lg font-semibold tracking-tight"></div>
+    <div id="clock-meta" class="text-[11px] sm:text-xs text-white/50 font-mono mt-0.5"></div>
   </div>
 
-  <!-- ====== Color Legend (right side) ====== -->
-  <div id="legend" class="glass absolute top-[4.75rem] sm:top-[6rem] right-2 sm:right-4 z-30 rounded-2xl p-2 sm:p-3 w-12 sm:w-16 hidden shadow-2xl">
+  <!-- ====== Color Legend (right side; pushed down on mobile so it clears the clock) ====== -->
+  <div id="legend" class="glass absolute top-[8.5rem] sm:top-[6rem] right-2 sm:right-4 z-30 rounded-2xl p-2 sm:p-3 w-12 sm:w-16 hidden shadow-2xl">
     <canvas id="legend-canvas" width="24" height="200" class="mx-auto rounded"></canvas>
     <div id="legend-max" class="text-[10px] text-white/60 text-center mt-1 font-mono"></div>
     <div id="legend-min" class="text-[10px] text-white/60 text-center mt-auto font-mono"></div>
+  </div>
+
+  <!-- ====== Draw tools: hint + FABs (bottom-right, above playback bar) ====== -->
+  <div id="draw-tools-stack" class="absolute right-2 sm:right-4 bottom-24 sm:bottom-28 z-[35] flex flex-col items-end gap-2 pointer-events-none"
+       role="toolbar" aria-label="Map region tools">
+    <div id="draw-hint-card" class="pointer-events-auto hidden glass rounded-2xl border border-indigo-400/25 px-3 py-2.5 shadow-2xl max-w-[min(18rem,calc(100vw-5rem))]">
+      <div class="flex items-start gap-2">
+        <div class="min-w-0 flex-1">
+          <div class="text-xs font-semibold text-white/90 tracking-tight">Load data for an area</div>
+          <p class="text-[11px] text-white/60 mt-1 leading-snug">
+            <span class="sm:hidden">Tap</span><span class="hidden sm:inline">Click</span>
+            <span class="text-indigo-200 font-medium">Draw</span>, place corners on the map, then <span class="text-white/75">double-tap</span><span class="hidden sm:inline"> / double-click</span> to finish.
+            <span class="text-white/40">Clear</span> removes the overlay.
+            <span class="text-white/40">Upload</span> accepts a shapefile <span class="text-white/35">(.zip with .shp/.shx/.dbf, or single .shp)</span>.
+          </p>
+        </div>
+        <button type="button" id="btn-draw-hint-dismiss" onclick="dismissDrawHint()"
+                class="shrink-0 -mt-0.5 -mr-0.5 w-7 h-7 rounded-lg text-white/45 hover:text-white hover:bg-white/10 text-lg leading-none transition-colors"
+                aria-label="Dismiss drawing hint">×</button>
+      </div>
+    </div>
+    <div id="draw-dock" class="flex flex-col gap-2 items-end pointer-events-none">
+      <input type="file" id="shapefile-input" class="hidden" accept=".zip,.shp,application/zip,application/octet-stream" tabindex="-1" />
+      <button type="button" id="btn-draw" aria-pressed="false"
+              title="Draw area — outline a region on the map to load forecast data"
+              class="pointer-events-auto glass w-11 h-11 sm:w-12 sm:h-12 rounded-2xl flex items-center justify-center text-indigo-300 hover:text-indigo-200 shadow-2xl transition-all active:scale-95"
+              onclick="toggleDrawArea()">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg>
+        <span id="btn-draw-label" class="sr-only">Draw area</span>
+      </button>
+      <button type="button" id="btn-shapefile"
+              title="Upload shapefile — .zip (recommended: .shp+.shx+.dbf+.prj) or .shp; uses polygon bounding box"
+              class="pointer-events-auto glass w-11 h-11 sm:w-12 sm:h-12 rounded-2xl flex items-center justify-center text-sky-300 hover:text-sky-200 shadow-2xl transition-all active:scale-95"
+              onclick="pickShapefile()">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+        <span class="sr-only">Upload shapefile</span>
+      </button>
+      <button type="button" id="btn-clear"
+              title="Clear region and forecast overlay from the map"
+              class="pointer-events-auto glass w-11 h-11 sm:w-12 sm:h-12 rounded-2xl flex items-center justify-center text-white/70 hover:text-white shadow-2xl transition-all active:scale-95"
+              onclick="clearDrawing()">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 6h18M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2m2 0v14a2 2 0 01-2 2H8a2 2 0 01-2-2V6h12z"/></svg>
+        <span class="sr-only">Clear</span>
+      </button>
+    </div>
   </div>
 
   <!-- ====== Playback Bar (bottom, draggable) ====== -->
@@ -373,7 +419,7 @@
       <div id="loading-text" class="text-sm text-white/70 mt-3">Loading forecast data...</div>
       <div id="loading-progress-wrap" class="hidden mt-3 w-64 mx-auto">
         <div class="h-2 rounded-full bg-white/20 overflow-hidden">
-          <div id="loading-progress-bar" class="h-full bg-emerald-400 transition-all duration-200" style="width: 0%"></div>
+          <div id="loading-progress-bar" class="h-full bg-emerald-400 transition-[width] duration-200 ease-out" style="width: 0%"></div>
         </div>
         <div id="loading-progress-label" class="text-[11px] text-white/60 mt-1">0%</div>
       </div>
@@ -476,23 +522,32 @@
     // ── Parameter registry ────────────────────────────────────────────────────
     // Each entry drives the dropdown, color ramp, unit conversion, tooltip, and sparkline.
     // convert: raw Zarr float → display value; decimals: tooltip precision.
+    const PARAM_GROUP_ORDER = [
+      'Temperature & Humidity',
+      'Wind',
+      'Precipitation & Water',
+      'Clouds & Pressure',
+      'Radiation & Energy',
+      'Derived',
+    ];
+
     const PARAMS_CONFIG = [
-      { key: 't_2m',      label: 'Temperature 2m',   accent: 'text-orange-300', ramp: 'turbo',    unit: '°C',   decimals: 1, convert: v => v - 273.15, zeroTransparent: false, sparkColor: '#fb923c' },
-      { key: 'tot_prec',  label: 'Precipitation',     accent: 'text-blue-300',   ramp: 'ylgnbu',   unit: 'mm',   decimals: 2, convert: v => v,          zeroTransparent: true,  sparkColor: '#60a5fa' },
-      { key: 'wind_10m',  label: 'Wind Flow 10m',     accent: 'text-violet-300', ramp: 'plasma',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#c4b5fd' },
-      { key: 'u_10m',     label: 'Wind U 10m',        accent: 'text-purple-300', ramp: 'rdylbu',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#a78bfa' },
-      { key: 'v_10m',     label: 'Wind V 10m',        accent: 'text-purple-300', ramp: 'rdylbu',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#c4b5fd' },
-      { key: 'pmsl',      label: 'Pressure MSL',      accent: 'text-green-300',  ramp: 'spectral', unit: 'hPa',  decimals: 1, convert: v => v / 100,    zeroTransparent: false, sparkColor: '#34d399' },
-      { key: 'clct',      label: 'Cloud Cover',       accent: 'text-sky-300',    ramp: 'blues',    unit: '%',    decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#93c5fd' },
-      { key: 'relhum_2m', label: 'Rel. Humidity 2m',  accent: 'text-cyan-300',   ramp: 'blues',    unit: '%',    decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#7dd3fc' },
-      { key: 'aswdir_s',  label: 'Solar Radiation',   accent: 'text-yellow-300', ramp: 'warm',     unit: 'W/m²', decimals: 0, convert: v => v,          zeroTransparent: false, sparkColor: '#fbbf24' },
-      { key: 'td_2m',     label: 'Dew Point 2m',      accent: 'text-teal-300',   ramp: 'cool',     unit: '°C',   decimals: 1, convert: v => v - 273.15, zeroTransparent: false, sparkColor: '#2dd4bf' },
-      { key: 'vmax_10m',  label: 'Wind Gust 10m',     accent: 'text-rose-300',   ramp: 'plasma',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#fb7185' },
-      { key: 'asob_s',    label: 'Net SW Radiation',  accent: 'text-amber-300',  ramp: 'warm',     unit: 'W/m²', decimals: 0, convert: v => v,          zeroTransparent: false, sparkColor: '#f59e0b' },
-      { key: 'alhfl_s',   label: 'Latent Heat Flux',  accent: 'text-lime-300',   ramp: 'rdylbu',   unit: 'W/m²', decimals: 0, convert: v => v,          zeroTransparent: false, sparkColor: '#a3e635' },
-      { key: 'runoff_s',  label: 'Surface Runoff',    accent: 'text-blue-400',   ramp: 'blues',    unit: 'kg/m²',decimals: 2, convert: v => v,          zeroTransparent: true,  sparkColor: '#38bdf8' },
-      { key: 'runoff_g',  label: 'Subsurface Runoff', accent: 'text-indigo-300', ramp: 'blues',    unit: 'kg/m²',decimals: 2, convert: v => v,          zeroTransparent: true,  sparkColor: '#818cf8' },
-      { key: 'pet_pm',    label: 'PET (Penman-Monteith)', accent: 'text-fuchsia-300', ramp: 'inferno', unit: 'mm/h', decimals: 2, convert: v => v,      zeroTransparent: true,  sparkColor: '#f0abfc' },
+      { key: 't_2m',      group: 'Temperature & Humidity', label: 'Temperature 2m',   accent: 'text-orange-300', ramp: 'turbo',    unit: '°C',   decimals: 1, convert: v => v - 273.15, zeroTransparent: false, sparkColor: '#fb923c' },
+      { key: 'td_2m',     group: 'Temperature & Humidity', label: 'Dew Point 2m',      accent: 'text-teal-300',   ramp: 'cool',     unit: '°C',   decimals: 1, convert: v => v - 273.15, zeroTransparent: false, sparkColor: '#2dd4bf' },
+      { key: 'relhum_2m', group: 'Temperature & Humidity', label: 'Rel. Humidity 2m',  accent: 'text-cyan-300',   ramp: 'blues',    unit: '%',    decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#7dd3fc' },
+      { key: 'wind_10m',  group: 'Wind',                    label: 'Wind Flow 10m',     accent: 'text-violet-300', ramp: 'plasma',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#c4b5fd' },
+      { key: 'u_10m',     group: 'Wind',                    label: 'Wind U 10m',        accent: 'text-purple-300', ramp: 'rdylbu',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#a78bfa' },
+      { key: 'v_10m',     group: 'Wind',                    label: 'Wind V 10m',        accent: 'text-purple-300', ramp: 'rdylbu',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#c4b5fd' },
+      { key: 'vmax_10m',  group: 'Wind',                    label: 'Wind Gust 10m',     accent: 'text-rose-300',   ramp: 'plasma',   unit: 'm/s',  decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#fb7185' },
+      { key: 'tot_prec',  group: 'Precipitation & Water',   label: 'Precipitation',     accent: 'text-blue-300',   ramp: 'ylgnbu',   unit: 'mm',   decimals: 2, convert: v => v,          zeroTransparent: true,  sparkColor: '#60a5fa' },
+      { key: 'runoff_s',  group: 'Precipitation & Water',   label: 'Surface Runoff',    accent: 'text-blue-400',   ramp: 'blues',    unit: 'kg/m²',decimals: 2, convert: v => v,          zeroTransparent: true,  sparkColor: '#38bdf8' },
+      { key: 'runoff_g',  group: 'Precipitation & Water',   label: 'Subsurface Runoff', accent: 'text-indigo-300', ramp: 'blues',    unit: 'kg/m²',decimals: 2, convert: v => v,          zeroTransparent: true,  sparkColor: '#818cf8' },
+      { key: 'clct',      group: 'Clouds & Pressure',       label: 'Cloud Cover',       accent: 'text-sky-300',    ramp: 'blues',    unit: '%',    decimals: 1, convert: v => v,          zeroTransparent: false, sparkColor: '#93c5fd' },
+      { key: 'pmsl',      group: 'Clouds & Pressure',       label: 'Pressure MSL',      accent: 'text-green-300',  ramp: 'spectral', unit: 'hPa',  decimals: 1, convert: v => v / 100,    zeroTransparent: false, sparkColor: '#34d399' },
+      { key: 'aswdir_s',  group: 'Radiation & Energy',      label: 'Solar Radiation',   accent: 'text-yellow-300', ramp: 'warm',     unit: 'W/m²', decimals: 0, convert: v => v,          zeroTransparent: false, sparkColor: '#fbbf24' },
+      { key: 'asob_s',    group: 'Radiation & Energy',      label: 'Net SW Radiation',  accent: 'text-amber-300',  ramp: 'warm',     unit: 'W/m²', decimals: 0, convert: v => v,          zeroTransparent: false, sparkColor: '#f59e0b' },
+      { key: 'alhfl_s',   group: 'Radiation & Energy',      label: 'Latent Heat Flux',  accent: 'text-lime-300',   ramp: 'rdylbu',   unit: 'W/m²', decimals: 0, convert: v => v,          zeroTransparent: false, sparkColor: '#a3e635' },
+      { key: 'pet_pm',    group: 'Derived',                 label: 'PET (Penman-Monteith)', accent: 'text-fuchsia-300', ramp: 'inferno', unit: 'mm/h', decimals: 2, convert: v => v,      zeroTransparent: true,  sparkColor: '#f0abfc' },
     ];
 
     /** Returns the config entry for the currently selected parameter. */
@@ -723,6 +778,9 @@
       });
     }
 
+    /** Last shown loading bar percent; used to avoid animating backwards (e.g. 5% → 0% when fetchSlice resets). */
+    let _loadingBarPct = -1;
+
     function setLoadingProgress(percent, label = null) {
       const wrap = document.getElementById('loading-progress-wrap');
       const bar = document.getElementById('loading-progress-bar');
@@ -730,14 +788,36 @@
       if (!wrap || !bar || !progressLabel) return;
       if (percent == null || Number.isNaN(percent)) {
         wrap.classList.add('hidden');
+        bar.classList.add('progress-bar-instant');
         bar.style.width = '0%';
+        void bar.offsetHeight;
+        bar.classList.remove('progress-bar-instant');
         progressLabel.textContent = '0%';
+        _loadingBarPct = -1;
         return;
       }
       const clamped = Math.max(0, Math.min(100, Number(percent)));
-      wrap.classList.remove('hidden');
-      bar.style.width = `${clamped}%`;
+      const wasHidden = wrap.classList.contains('hidden');
+      const prev = _loadingBarPct;
+      const decreasing = prev >= 0 && clamped < prev;
+
+      if (wasHidden) {
+        bar.classList.add('progress-bar-instant');
+        bar.style.width = '0%';
+        wrap.classList.remove('hidden');
+        void bar.offsetHeight;
+        bar.classList.remove('progress-bar-instant');
+        bar.style.width = `${clamped}%`;
+      } else if (decreasing) {
+        bar.classList.add('progress-bar-instant');
+        bar.style.width = `${clamped}%`;
+        void bar.offsetHeight;
+        bar.classList.remove('progress-bar-instant');
+      } else {
+        bar.style.width = `${clamped}%`;
+      }
       progressLabel.textContent = label ?? `${Math.round(clamped)}%`;
+      _loadingBarPct = clamped;
     }
 
     // =======================================================================
@@ -813,7 +893,7 @@
       const totalChunks = chunkJobs.length;
       let fetched = 0;
       setLoadingText(`Loading forecast data... (0/${totalChunks} chunks)`);
-      setLoadingProgress(0, '0%');
+      // Keep any pre-fetch bar (e.g. 5% "Preparing"); do not reset to 0 here.
 
       // Fetch chunks in parallel (batches of 6 to avoid overwhelming)
       const BATCH = 6;
@@ -878,7 +958,9 @@
 
           fetched++;
           setLoadingText(`Loading forecast data... (${fetched}/${totalChunks} chunks)`);
-          const pct = totalChunks > 0 ? (fetched / totalChunks) * 100 : 100;
+          const rawPct = totalChunks > 0 ? (fetched / totalChunks) * 100 : 100;
+          // Floor 5% (matches "Preparing"); cap <90 so the next step can go to 90% without the bar jumping backward.
+          const pct = Math.max(5, Math.min(89, rawPct));
           setLoadingProgress(pct, `${Math.round(pct)}%`);
         }));
       }
@@ -1184,12 +1266,27 @@
 
     function initParamSelect() {
       const sel = document.getElementById('param-select');
-      PARAMS_CONFIG.forEach(p => {
-        const opt = document.createElement('option');
-        opt.value = p.key;
-        opt.textContent = p.label;
-        sel.appendChild(opt);
-      });
+      sel.replaceChildren();
+      const byGroup = new Map();
+      for (const g of PARAM_GROUP_ORDER) byGroup.set(g, []);
+      for (const p of PARAMS_CONFIG) {
+        const g = p.group || 'Other';
+        if (!byGroup.has(g)) byGroup.set(g, []);
+        byGroup.get(g).push(p);
+      }
+      for (const g of PARAM_GROUP_ORDER) {
+        const items = byGroup.get(g);
+        if (!items || !items.length) continue;
+        const og = document.createElement('optgroup');
+        og.label = g;
+        for (const p of items) {
+          const opt = document.createElement('option');
+          opt.value = p.key;
+          opt.textContent = p.label;
+          og.appendChild(opt);
+        }
+        sel.appendChild(og);
+      }
       sel.value = currentParam;
     }
 
@@ -1218,6 +1315,14 @@
         attachDrawControl();
         bindDrawEvents();
         ensureWindOverlay();
+        maybeShowDrawHint();
+      });
+
+      document.getElementById('shapefile-input')?.addEventListener('change', (e) => {
+        const input = e.target;
+        const file = input.files && input.files[0];
+        input.value = '';
+        if (file) handleShapefileFile(file);
       });
 
       // Offscreen canvas for value->color mapping; MapLibre renders it via ImageSource.
@@ -1379,6 +1484,38 @@
     // =======================================================================
     let panelWasOpenBeforeDrawing = false;
 
+    const DRAW_HINT_LS_KEY = 'climworx_draw_hint_dismissed_v1';
+    let drawHintSuppressedSession = false;
+    function drawHintWasDismissed() {
+      try { return localStorage.getItem(DRAW_HINT_LS_KEY) === '1'; } catch (_) { return false; }
+    }
+    function hideDrawHintVisual() {
+      document.getElementById('draw-hint-card')?.classList.add('hidden');
+      document.getElementById('draw-tools-stack')?.classList.remove('draw-tools-attn');
+    }
+    /** “Don’t show again” (× on hint card). */
+    window.dismissDrawHint = function() {
+      try { localStorage.setItem(DRAW_HINT_LS_KEY, '1'); } catch (_) {}
+      drawHintSuppressedSession = true;
+      hideDrawHintVisual();
+    };
+    /** User opened Draw — hide callout and FAB pulse for this session only. */
+    function suppressDrawHintForSession() {
+      drawHintSuppressedSession = true;
+      hideDrawHintVisual();
+    }
+    function maybeShowDrawHint() {
+      if (sliceBounds || drawHintWasDismissed() || drawHintSuppressedSession) return;
+      setTimeout(() => {
+        if (sliceBounds || drawHintWasDismissed() || drawHintSuppressedSession) return;
+        const card = document.getElementById('draw-hint-card');
+        const stack = document.getElementById('draw-tools-stack');
+        if (!card || !stack) return;
+        card.classList.remove('hidden');
+        stack.classList.add('draw-tools-attn');
+      }, 1100);
+    }
+
     function setDrawAreaToggleUi(drawingOn) {
       const btn = document.getElementById('btn-draw');
       const label = document.getElementById('btn-draw-label');
@@ -1425,6 +1562,7 @@
       draw.deleteAll();
       // Drawing interacts more reliably when animation is paused.
       if (playing) togglePlay();
+      suppressDrawHintForSession();
       draw.changeMode('draw_polygon');
       map.getContainer().classList.add('draw-area-active');
       setDrawAreaToggleUi(true);
@@ -1446,28 +1584,118 @@
       document.getElementById('legend')?.classList.add('hidden');
       document.getElementById('area-info')?.classList.add('hidden');
       document.getElementById('tooltip')?.classList.add('hidden');
-      map.getContainer().classList.remove('draw-area-active');
+      map?.getContainer()?.classList.remove('draw-area-active');
       setDrawAreaToggleUi(false);
+      const sfIn = document.getElementById('shapefile-input');
+      if (sfIn) sfIn.value = '';
     };
 
-    async function onDrawComplete(e) {
-      setDrawAreaToggleUi(false);
-      map.getContainer().classList.remove('draw-area-active');
+    /** Lazy-load shpjs (reads .zip shapefile bundles or .shp; may use .prj via proj4 when present). */
+    let _shpParserPromise = null;
+    function loadShpParser() {
+      if (!_shpParserPromise) {
+        _shpParserPromise = import('https://esm.sh/shpjs@6.2.0')
+          .then((m) => {
+            const fn = m.default;
+            if (typeof fn !== 'function') throw new Error('Shapefile parser failed to load');
+            return fn;
+          })
+          .catch((e) => {
+            _shpParserPromise = null;
+            throw e;
+          });
+      }
+      return _shpParserPromise;
+    }
 
-      const feature = e.features[0];
-      if (!feature || feature.geometry.type !== 'Polygon') return;
+    /** Collect Polygon / MultiPolygon features from shpjs output (FeatureCollection, Feature, array of layers, etc.). */
+    function flattenGeojsonPolygons(raw) {
+      const out = [];
+      function addGeom(geom) {
+        if (!geom) return;
+        if (geom.type === 'Polygon' || geom.type === 'MultiPolygon') {
+          out.push({ type: 'Feature', properties: {}, geometry: geom });
+        }
+      }
+      function walk(node) {
+        if (!node) return;
+        if (Array.isArray(node)) {
+          node.forEach(walk);
+          return;
+        }
+        if (node.type === 'FeatureCollection' && Array.isArray(node.features)) {
+          node.features.forEach((f) => addGeom(f && f.geometry));
+          return;
+        }
+        if (node.type === 'Feature') {
+          addGeom(node.geometry);
+          return;
+        }
+        addGeom(node);
+      }
+      walk(raw);
+      return out;
+    }
 
-      const coords = feature.geometry.coordinates[0];
-      const lons = coords.map(c => c[0]);
-      const lats = coords.map(c => c[1]);
-      const south = Math.max(Math.min(...lats), -90);
-      const north = Math.min(Math.max(...lats), 90);
-      const west  = Math.max(Math.min(...lons), -180);
-      const east  = Math.min(Math.max(...lons), 179.875);
+    function bboxFromPolygonFeatures(features) {
+      let west = Infinity;
+      let east = -Infinity;
+      let south = Infinity;
+      let north = -Infinity;
+      let ok = false;
+      for (const f of features) {
+        const g = f.geometry;
+        if (g.type === 'Polygon') {
+          for (const [lon, lat] of g.coordinates[0]) {
+            ok = true;
+            west = Math.min(west, lon);
+            east = Math.max(east, lon);
+            south = Math.min(south, lat);
+            north = Math.max(north, lat);
+          }
+        } else if (g.type === 'MultiPolygon') {
+          for (const poly of g.coordinates) {
+            for (const [lon, lat] of poly[0]) {
+              ok = true;
+              west = Math.min(west, lon);
+              east = Math.max(east, lon);
+              south = Math.min(south, lat);
+              north = Math.max(north, lat);
+            }
+          }
+        }
+      }
+      return ok ? { west, east, south, north } : null;
+    }
 
-      // Convert to array indices (clamp to grid)
-      const latStart = Math.max(latToIndex(north), 0);        // north = smaller index
-      const latEnd   = Math.min(latToIndex(south) + 1, NY);   // south = larger index
+    function clampLatLonBounds({ west, east, south, north }) {
+      const s = Math.min(south, north);
+      const n = Math.max(south, north);
+      const w = Math.min(west, east);
+      const e = Math.max(west, east);
+      return {
+        south: Math.max(s, -90),
+        north: Math.min(n, 90),
+        west: Math.max(w, -180),
+        east: Math.min(e, 179.875),
+      };
+    }
+
+    function bboxLooksLikeLatLon({ west, east, south, north }) {
+      if (!Number.isFinite(west) || !Number.isFinite(east) || !Number.isFinite(south) || !Number.isFinite(north)) return false;
+      if (Math.abs(east - west) > 370 || Math.abs(north - south) > 185) return false;
+      return west >= -190 && east <= 190 && south >= -95 && north <= 95;
+    }
+
+    /**
+     * Shared path: grid bounds from geographic box → optional large-area dialog → Zarr fetch → render.
+     * @param {{ useDrawCleanup?: boolean }} options — when true, clear MapboxDraw after errors/success (hand-drawn path).
+     */
+    async function runSlicePipelineForBounds(south, north, west, east, options = {}) {
+      const useDrawCleanup = options.useDrawCleanup !== false;
+
+      const latStart = Math.max(latToIndex(north), 0);
+      const latEnd   = Math.min(latToIndex(south) + 1, NY);
       const lonStart = Math.max(lonToIndex(west), 0);
       const lonEnd   = Math.min(lonToIndex(east) + 1, NX);
 
@@ -1476,9 +1704,14 @@
       const totalPixels = nLat * nLon;
 
       if (totalPixels > HARD_MAX_PIXELS) {
-        showToast(`Selected area is too large (${totalPixels.toLocaleString()} pixels). Maximum is ${HARD_MAX_PIXELS.toLocaleString()}. Draw a smaller region.`, 'error');
-        draw.deleteAll();
-        setDrawAreaToggleUi(false);
+        showToast(
+          `Selected area is too large (${totalPixels.toLocaleString()} pixels). Maximum is ${HARD_MAX_PIXELS.toLocaleString()}. Choose a smaller region.`,
+          'error',
+        );
+        if (useDrawCleanup && draw) {
+          draw.deleteAll();
+          setDrawAreaToggleUi(false);
+        }
         return;
       }
       if (totalPixels > MAX_PIXELS) {
@@ -1499,8 +1732,10 @@
           },
         );
         if (choice === 'cancel') {
-          draw.deleteAll();
-          setDrawAreaToggleUi(false);
+          if (useDrawCleanup && draw) {
+            draw.deleteAll();
+            setDrawAreaToggleUi(false);
+          }
           return;
         }
         if (choice === 'alt') {
@@ -1512,15 +1747,12 @@
         }
       }
 
-      // Store bounds for canvas rendering
       sliceBounds = { south, west, north, east, latStart, latEnd, lonStart, lonEnd, nLat, nLon, sampleStride };
 
-      // Show loading
       showLoading('Preparing request...');
       setLoadingProgress(5, 'Preparing');
 
       try {
-        // Release old data
         sliceData = null;
         windUSliceData = null;
         windVSliceData = null;
@@ -1537,12 +1769,10 @@
         sliceBounds.nLon = result.nLon;
         sliceBounds.sampleStride = result.sampleStride || 1;
 
-        // Compute min/max for color scale (excluding NaN)
         setLoadingText('Computing color scale...');
         setLoadingProgress(95, 'Finalizing');
         computeColorScale();
 
-        // Show UI
         currentStep = 0;
         document.getElementById('playback').classList.remove('hidden');
         document.getElementById('clock').classList.remove('hidden');
@@ -1561,20 +1791,91 @@
         await new Promise(requestAnimationFrame);
         renderFrame();
 
-        // Clear the drawn rectangle — the color overlay is now the selection
-        draw.deleteAll();
-        setDrawAreaToggleUi(false);
+        if (useDrawCleanup && draw) {
+          draw.deleteAll();
+          setDrawAreaToggleUi(false);
+        }
 
-        // Close the controls panel so the map is fully visible
         if (panelVisible) togglePanel();
 
-        // Auto-play animation
         if (!playing) togglePlay();
       } catch (err) {
         showToast(`Failed to fetch data: ${err.message}`, 'error');
         console.error(err);
       } finally {
         hideLoading();
+      }
+    }
+
+    async function onDrawComplete(e) {
+      setDrawAreaToggleUi(false);
+      map.getContainer().classList.remove('draw-area-active');
+
+      const feature = e.features[0];
+      if (!feature || feature.geometry.type !== 'Polygon') return;
+
+      const coords = feature.geometry.coordinates[0];
+      const lons = coords.map(c => c[0]);
+      const lats = coords.map(c => c[1]);
+      const south = Math.max(Math.min(...lats), -90);
+      const north = Math.min(Math.max(...lats), 90);
+      const west  = Math.max(Math.min(...lons), -180);
+      const east  = Math.min(Math.max(...lons), 179.875);
+
+      await runSlicePipelineForBounds(south, north, west, east, { useDrawCleanup: true });
+    }
+
+    window.pickShapefile = function() {
+      document.getElementById('shapefile-input')?.click();
+    };
+
+    async function handleShapefileFile(file) {
+      if (!map) return;
+      if (!draw) {
+        showToast('Map is still loading — wait a second and try again.', 'info');
+        return;
+      }
+      suppressDrawHintForSession();
+      if (playing) togglePlay();
+
+      try {
+        showLoading('Reading shapefile...');
+        const shpParse = await loadShpParser();
+        const buf = await file.arrayBuffer();
+        const raw = await shpParse(buf);
+        hideLoading();
+
+        const polyFeats = flattenGeojsonPolygons(raw);
+        if (!polyFeats.length) {
+          showToast('No polygon found. Use a polygon layer; a .zip with .shp+.shx+.dbf is most reliable.', 'error');
+          return;
+        }
+        const bb0 = bboxFromPolygonFeatures(polyFeats);
+        if (!bb0) {
+          showToast('Could not read polygon bounds.', 'error');
+          return;
+        }
+        const { south, north, west, east } = clampLatLonBounds(bb0);
+        if (!bboxLooksLikeLatLon({ west, east, south, north })) {
+          showToast(
+            'Bounds do not look like WGS 84 lat/lon. Export as geographic coordinates (EPSG:4326) or include a .prj in the zip.',
+            'error',
+          );
+          return;
+        }
+
+        try {
+          map.fitBounds(
+            [[west, south], [east, north]],
+            { padding: 52, duration: 900, maxZoom: 12 },
+          );
+        } catch (_) { /* ignore */ }
+
+        await runSlicePipelineForBounds(south, north, west, east, { useDrawCleanup: false });
+      } catch (err) {
+        hideLoading();
+        showToast(`Shapefile: ${err && err.message ? err.message : String(err)}`, 'error');
+        console.error(err);
       }
     }
 
