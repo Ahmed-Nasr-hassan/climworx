@@ -15,16 +15,16 @@ pip install xarray cfgrib zarr s3fs numpy requests netCDF4 numcodecs dask
 # System dependency (required for regridding)
 apt-get install cdo  # CDO >= 2.0
 
-# Run single parameter (staging phase)
+# Run single parameter (writes Zarr + _SUCCESS under runs/{YYYYMMDDHH}/{param}/)
 PARAMETER=tot_prec MODEL_RUN=00 python etl.py
 
-# Validation + promotion (copy staging→runs, cleanup staging). Does NOT flip /latest.
+# Smoke-validate runs/…, write runs/{run}/_PROMOTED, best-effort legacy staging cleanup. Does NOT flip /latest.
 MODEL_RUN=00 python etl.py --validate-only --params tot_prec t_2m
 
-# Derive PET into runs/{run}/pet_pm/ (requires t_2m, td_2m, u_10m, v_10m, asob_s, athb_s, ps already promoted)
+# Derive PET into runs/{run}/pet_pm/ (requires those seven params under runs/{run}/ with _SUCCESS)
 python derive_pet.py --run-dt 2026041500
 
-# Finalize: flip /latest, rebuild spatial_index, run janitor. Run AFTER derive_pet.py.
+# Finalize: requires runs/{run}/_PROMOTED from validate step; flip /latest, rebuild spatial_index, janitor. Run AFTER derive_pet.py.
 MODEL_RUN=00 python etl.py --finalize --params tot_prec t_2m pet_pm
 
 # Run with ensemble members (40 members, ~40× more storage)
@@ -76,6 +76,9 @@ The `wrangler.toml` (not committed) must bind R2 as `DATABANK` and KV as `METADA
 | `RUN_DATE` | No | `YYYYMMDD`, defaults to today UTC |
 | `ENABLE_ENSEMBLE` | No | `true` to process 40 ensemble members |
 | `KEEP_RUNS` | No | Runs to retain, default `1` |
+| `ETL_DOWNLOAD_WORKERS` | No | Parallel DWD GRIB downloads per matrix job (default `6`) |
+| `PET_LOAD_WORKERS` | No | Parallel Zarr opens in `derive_pet.py` (default `7`) |
+| `VALIDATE_CONCURRENCY` | No | Parallel param validation in promote job (default `3`) |
 
 ## Architecture
 
@@ -85,13 +88,13 @@ Each phase is a separate GitHub Actions job (`probe` → `etl` matrix → `promo
 
 1. **DWD Availability Probe** (`probe` job, `probe_dwd.py`) — Fast HEAD-request scan of all 16 params × all forecast steps (~1,500 URLs) with 50 concurrent workers (~30-60s). Outputs a `manifest.json` listing which steps exist on DWD for each parameter *before* any heavy downloading begins. Runs in parallel with `build-assets`. Matrix jobs use the manifest to skip known-missing steps without hitting DWD, and the pipeline gets an early-exit opportunity if too many steps are missing (>15% threshold).
 
-2. **Staging** (`etl` matrix, one job per param) — `resolve_available_run()` probes DWD for the requested run and falls back to older runs (6h steps, up to 4 cycles back) if not yet published. Uses a **download-first** pattern: `download_all_steps()` fetches all GRIB2.bz2 files in parallel (8 workers) before any regridding begins, so mid-pipeline DWD file rotation cannot cause failures. When a probe manifest is available (`--manifest`), only known-available steps are downloaded. Step-0 of accumulated fields (e.g. `tot_prec`) is a ~200-byte stub with no grid metadata — `regrid_grib_bytes()` detects files < 10,000 bytes and returns an all-zeros `_make_zeros_dataset()` instead. Full-size GRIBs are regridded from icosahedral → 0.125° lat/lon via `cdo remap,{target_grid},{weights}` using pre-computed weight files in `assets/`. Uploads concatenated Zarr to `s3://icon-global-databank/staging/{YYYYMMDDHH}/{param}/` with a `_SUCCESS` marker. When DWD fallback kicks in, an `_RESOLVED_RUN` marker is written under the *original* CI run_dt so downstream jobs can discover which run was actually staged.
+2. **ETL matrix** (`etl` job, one matrix cell per param) — `resolve_available_run()` probes DWD for the requested run and falls back to older runs (6h steps, up to 4 cycles back) if not yet published. Uses a **download-first** pattern: `download_all_steps()` fetches all GRIB2.bz2 files in parallel (throttled; default `ETL_DOWNLOAD_WORKERS=6`) before any regridding, so mid-pipeline DWD file rotation cannot cause failures. When a probe manifest is available (`--manifest`), only known-available steps are downloaded. Step-0 of accumulated fields (e.g. `tot_prec`) is a ~200-byte stub with no grid metadata — `regrid_grib_bytes()` detects files < 10,000 bytes and returns an all-zeros `_make_zeros_dataset()` instead. Full-size GRIBs are regridded from icosahedral → 0.125° lat/lon via `cdo -s -f nc4 remap,{target_grid},{weights}` using pre-computed weight files in `assets/`. CF auxiliary `*_bnds` variables from CDO are dropped before concat. **Uploads concatenated Zarr directly to** `s3://icon-global-databank/runs/{YYYYMMDDHH}/{param}/` with a per-param `_SUCCESS` marker (no full-dataset staging copy). When DWD fallback writes under a different model init than CI requested, `_RESOLVED_RUN` is written at `staging/{original_CI_YYYYMMDDHH}/_RESOLVED_RUN` (small redirect file only) so promote / derive / finalize can resolve the real `run_dt`.
 
-3. **Validation + Promotion** (`promote` job, `etl.py --validate-only`) — Validation checks all expected steps present (warns on missing, doesn't fail), arrays non-empty with no all-NaN slices, values within `PARAM_BOUNDS`, and Zarr metadata readable. Uses dask-lazy `.compute()` to avoid loading entire arrays into RAM (~1.6 GB per parameter). Retries with exponential backoff (max 3 attempts). After validation, `promote_run()` copies `staging/{run}/{param}/` → `runs/{run}/{param}/`, writes `_SUCCESS` under the promoted path, and deletes the staging copy per-param (kills the duplicate-storage window). Partial per-param cleanup failures warn-and-continue; only if *all* params fail cleanup does the job fail (systemic auth/R2 issue). The `_RESOLVED_RUN` marker is intentionally left in staging for the later finalize job. Does NOT flip `/latest` or run janitor.
+3. **Validate + _PROMOTED** (`promote` job, `etl.py --validate-only`) — Discovers params that have `runs/{run}/{param}/_SUCCESS` (honoring `_RESOLVED_RUN` when present). **Smoke validation:** Zarr opens with consolidated metadata, one small lat/lon corner read on step 0 for the primary field (skips `*_bnds` for legacy stores), ensemble member count when applicable. Retries with exponential backoff (max 3 attempts); parallel validation across params via `VALIDATE_CONCURRENCY`. On success, writes **`runs/{run_dt}/_PROMOTED`** (JSON: run, params, timestamp) — finalize refuses to run without it. Best-effort **parallel** removal of legacy `staging/{run}/{param}/` mirrors if they exist (old pipeline layout). Does **not** copy bytes staging→runs (matrix already wrote `runs/`). Does NOT flip `/latest` or run janitor.
 
-4. **Derive PET** (`derive-pet` job, `derive_pet.py`) — Reads seven promoted params (`t_2m`, `td_2m`, `u_10m`, `v_10m`, `asob_s`, `athb_s`, `ps`) from `runs/{run}/`, computes FAO-56 Penman-Monteith PET (deaccumulating `asob_s`/`athb_s` to per-step fluxes first), and writes `runs/{run}/pet_pm/` with its own `_SUCCESS` marker. Honors `_RESOLVED_RUN` when `--run-dt` is passed. Does NOT touch `spatial_index.json` (finalize rebuilds it with `pet_pm` included).
+4. **Derive PET** (`derive-pet` job, `derive_pet.py`) — Loads seven params (`t_2m`, `td_2m`, `u_10m`, `v_10m`, `asob_s`, `athb_s`, `ps`) from `runs/{run}/` in parallel (`PET_LOAD_WORKERS`), computes FAO-56 Penman-Monteith PET (deaccumulating `asob_s`/`athb_s` to per-step fluxes first), and writes `runs/{run}/pet_pm/` with its own `_SUCCESS` marker. Honors `_RESOLVED_RUN` when `--run-dt` is passed. Does NOT touch `spatial_index.json` (finalize rebuilds it with `pet_pm` included).
 
-5. **Finalize + Janitor** (`finalize` job, `etl.py --finalize`) — Verifies every advertised param has `runs/{run}/{param}/_SUCCESS` (hard guard against out-of-band invocations), rebuilds `spatial_index.json` with `pet_pm` in the params list (reads actual steps from promoted Zarr), flips `/latest/_LATEST_RUN` to the new run, then runs janitor to delete runs and orphaned staging dirs older than `KEEP_RUNS`. `--validate-only` and `--finalize` are mutually exclusive in argparse.
+5. **Finalize + Janitor** (`finalize` job, `etl.py --finalize`) — Requires **`runs/{run}/_PROMOTED`** (proves promote validation ran). Verifies every advertised param has `runs/{run}/{param}/_SUCCESS`, rebuilds `spatial_index.json` with `pet_pm` in the params list (reads actual steps from Zarr), flips `/latest/_LATEST_RUN` to the new run, then runs janitor to delete runs and orphaned staging dirs older than `KEEP_RUNS`. `--validate-only` and `--finalize` are mutually exclusive in argparse.
 
 ### CDO Regridding
 
@@ -109,15 +112,17 @@ ICON GRIB2 files reference their native icosahedral grid only by UUID — CDO ca
 
 ### CI/CD
 
-GitHub Actions (`.github/workflows/main.yml`) runs 4×/day at 07:15, 13:15, 19:15, 01:15 UTC (~5h after each model init). Matrix processes 16 params (see `.github/workflows/main.yml` `matrix.parameter`). Job dependency: `resolve-run` → [`build-assets` ∥ `probe`] → `etl` (matrix) → `promote` → `derive-pet` → `finalize`. The `probe` and `build-assets` jobs run in parallel since both only need `resolve-run`. Promote discovers successfully-staged params from R2 (_SUCCESS markers), so a single param failure doesn't block the rest. `derive-pet` and `finalize` run only if their predecessors succeeded — a PET failure keeps the dashboard pinned to the previous run instead of shipping a run without the PET layer.
+GitHub Actions (`.github/workflows/main.yml`) runs 4×/day at 07:15, 13:15, 19:15, 01:15 UTC (~5h after each model init). Matrix processes 16 params (see `.github/workflows/main.yml` `matrix.parameter`). Job dependency: `resolve-run` → [`build-assets` ∥ `probe`] → `etl` (matrix) → `promote` → `derive-pet` → `finalize`. The `probe` and `build-assets` jobs run in parallel since both only need `resolve-run`. Promote discovers params with matrix `_SUCCESS` under `runs/` (after resolving `_RESOLVED_RUN`), so a single param failure doesn't block the rest. `derive-pet` and `finalize` run only if their predecessors succeeded — a PET failure keeps the dashboard pinned to the previous run instead of shipping a run without the PET layer.
 
 ### R2 Storage Layout
 
 ```
 icon-global-databank/
-├── staging/{YYYYMMDDHH}/{param}/   # Work-in-progress (Zarr + _SUCCESS)
-├── runs/{YYYYMMDDHH}/{param}/      # Validated, promoted
-├── latest/_LATEST_RUN              # Points to most recent YYYYMMDDHH
+├── staging/{YYYYMMDDHH}/           # _RESOLVED_RUN when CI run ≠ DWD run; optional legacy staging/…/{param}/ (cleaned by promote)
+├── runs/{YYYYMMDDHH}/
+│   ├── _PROMOTED                   # JSON — written after smoke validation (promote job)
+│   └── {param}/                    # Matrix Zarr + per-param _SUCCESS (+ pet_pm/ from derive)
+├── latest/_LATEST_RUN              # Points to most recent YYYYMMDDHH (finalize only)
 └── spatial_index.json              # Grid + steps metadata for Worker
 ```
 

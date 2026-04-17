@@ -11,16 +11,18 @@ DWD opendata (GRIB2/bz2)
         │
         ▼
 GitHub Actions (cron × 4/day)
-├── Matrix: 8 parameters × parallel jobs
-│   └── etl.py: download → decompress → CDO regrid → Zarr → R2 staging
+├── Matrix: one job per parameter (16 layers + optional ensemble)
+│   └── etl.py: download-first → CDO remap → Zarr → R2 runs/{run}/{param}/
 │
-└── Post-matrix: validate → promote → janitor
+├── Promote: smoke-validate runs/… → runs/{run}/_PROMOTED (no byte copy)
+├── derive_pet.py → runs/{run}/pet_pm/
+└── Finalize: spatial_index + /latest/_LATEST_RUN + janitor
         │
         ▼
 Cloudflare R2  (icon-global-databank)
-├── staging/{YYYYMMDDHH}/{param}/    ← in-progress
-├── runs/{YYYYMMDDHH}/{param}/       ← validated & promoted
-├── latest/_LATEST_RUN               ← pointer to latest run
+├── staging/{YYYYMMDDHH}/            ← _RESOLVED_RUN redirect when CI run ≠ DWD run; legacy dirs optional
+├── runs/{YYYYMMDDHH}/{param}/       ← canonical Zarr + _SUCCESS; runs/{run}/_PROMOTED after validate
+├── latest/_LATEST_RUN               ← set in finalize only
 └── spatial_index.json
         │
         ▼
@@ -33,11 +35,11 @@ Cloudflare Worker (icon-api-worker)
 | Concern | Choice | Reason |
 |---|---|---|
 | Grid | Icosahedral → 0.125° lat/lon | ICON native grid is unstructured; regridding enables Zarr spatial chunking |
-| Regridding tool | CDO `remapbil` | Battle-tested, handles ICON GRIB natively, bilinear interpolation |
-| Storage format | Zarr + Blosc (zstd, BITSHUFFLE) | Cloud-optimised, byte-range reads, excellent compression for float32 grids |
-| Chunking | `{lat: 100, lon: 100, step: -1}` | ~1.8 MB per spatial chunk; step unchunked for full time-series in one read |
-| Idempotency | 3-phase: staging → validation → promotion | Guarantees `/latest/` is never stale; safe to re-run any job |
-| Cleanup | Post-success Janitor only | Never deletes data during or after a failed run |
+| Regridding tool | CDO `remap` + precomputed weights (`gendis` / `genycon`) | ICON needs grid + weights; distance vs conservative per field type |
+| Storage format | Zarr v2 + GZip(level=5) | Cloud-optimised chunks; Worker and dashboard decompress with gzip APIs |
+| Chunking | `{latitude: 100, longitude: 100, step: -1}` | Spatial chunks; step unchunked for full time-series in one read |
+| Idempotency | Matrix → validate + `_PROMOTED` → PET → finalize | `/latest` flips only after finalize; `_PROMOTED` gates finalize after smoke validation |
+| Cleanup | Janitor in finalize (successful pipeline) | Failed matrix rows may leave partial `runs/` data until janitor; markers gate what users see |
 | Worker data access | R2 binding (byte-range) | No public bucket, no egress fees within Cloudflare network |
 | Latest run caching | Worker in-memory + KV (5 min TTL) | Eliminates cold-path R2 reads for `_LATEST_RUN` |
 | Response caching | Cloudflare Cache API (1 h TTL) | Cache key = `{run}/{param}/{chunkLat}/{chunkLon}` |
@@ -117,7 +119,7 @@ id = "<kv-namespace-id-from-terraform-output>"
 
 ```bash
 # Install dependencies
-pip install xarray cfgrib zarr s3fs blosc numpy requests netCDF4
+pip install xarray cfgrib zarr s3fs numpy requests netCDF4 numcodecs dask
 sudo apt-get install cdo
 
 # Export credentials
@@ -129,9 +131,12 @@ export ALERT_WEBHOOK_URL=...
 # Run ETL for a single parameter
 PARAMETER=t_2m MODEL_RUN=00 python etl.py
 
-# Run validation + promotion (after all 8 parameters are staged)
+# Smoke-validate runs/…, write runs/{run}/_PROMOTED (after matrix uploaded those params)
 MODEL_RUN=00 python etl.py --validate-only \
   --params t_2m tot_prec u_10m v_10m pmsl clct relhum_2m aswdir_s
+
+# After derive_pet.py: finalize (requires runs/{run}/_PROMOTED from validate step)
+MODEL_RUN=00 python etl.py --finalize --params t_2m tot_prec u_10m v_10m pet_pm
 
 # Run ensemble (40 members — ~40× more data)
 PARAMETER=t_2m MODEL_RUN=00 ENABLE_ENSEMBLE=true python etl.py
@@ -139,32 +144,26 @@ PARAMETER=t_2m MODEL_RUN=00 ENABLE_ENSEMBLE=true python etl.py
 
 ---
 
-## ETL Pipeline — 3-Phase Workflow
+## ETL Pipeline (summary)
 
 ```
-Phase 1 — Staging
-  For each forecast step (0–78h hourly + 81–180h every 3h = 97 steps):
-    1. Download .grib2.bz2 from DWD opendata (streaming)
-    2. Decompress in-memory (bz2 stdlib)
-    3. Write to temp file → CDO remapbil → 0.125° regular NetCDF
-    4. Load into xarray, append step dimension
-  Concatenate all steps → to_zarr() with Blosc encoding → R2 staging
-  Write _SUCCESS marker
+Phase 1 — Matrix (etl.py per parameter)
+  Download-first for all steps → CDO remap to 0.125° → concat → Zarr + GZip
+  Upload to runs/{YYYYMMDDHH}/{param}/ + _SUCCESS
+  If DWD run differs from CI clock: staging/{CI}/_RESOLVED_RUN → actual run id
 
-Phase 2 — Validation
-  ✓ All 97 forecast steps present
-  ✓ Data arrays non-empty, no all-NaN chunks
-  ✓ Values within physical plausibility bounds
-  ✓ Ensemble: exactly 40 members
-  ✓ Zarr .zmetadata readable
-  ✗ Any failure → retry (max 3, exponential backoff) → alert webhook
+Phase 2 — Promote (GitHub discover + etl.py --validate-only)
+  Workflow lists params that have runs/…/_SUCCESS (honors _RESOLVED_RUN)
+  etl.py smoke-reads Zarr (step-0 corner tile, primary field for normal stores)
+  Write runs/{run}/_PROMOTED; best-effort delete legacy staging/{…}/{param}/ dirs
+  ✗ Failure → retry (max 3) → alert; does not flip /latest
 
-Phase 3 — Promotion + Janitor
-  Copy /staging/{run}/ → /runs/{run}/
-  Write _SUCCESS in /runs/{run}/
-  Update /latest/_LATEST_RUN
-  Write spatial_index.json
-  Janitor: delete /runs/ older than KEEP_RUNS=2, orphaned /staging/ dirs
+Phase 3 — derive_pet.py
+  Parallel open of seven source Zarrs → PET → runs/{run}/pet_pm/_SUCCESS
+
+Phase 4 — Finalize (etl.py --finalize)
+  Require _PROMOTED + all param _SUCCESS (incl. pet_pm)
+  Rebuild spatial_index.json, set latest/_LATEST_RUN, janitor (KEEP_RUNS)
 ```
 
 ---
@@ -175,17 +174,16 @@ Phase 3 — Promotion + Janitor
 icon-global-databank/
 ├── staging/
 │   └── 2026040300/
-│       ├── t_2m/
-│       │   ├── .zarray
-│       │   ├── .zmetadata
-│       │   ├── t_2m/0.0.0  ← chunk: step=all, lat=0..99, lon=0..99
-│       │   └── _SUCCESS
-│       └── tot_prec/ ...
+│       └── _RESOLVED_RUN   ← optional: when matrix wrote a different model init under runs/
 ├── runs/
 │   └── 2026040300/
-│       └── t_2m/ ...       ← validated, promoted copy
+│       ├── _PROMOTED       ← JSON marker after successful promote (validate) job
+│       ├── t_2m/           ← Zarr group + _SUCCESS (written by matrix, not copied)
+│       │   └── t_2m/.zarray …
+│       ├── tot_prec/ …
+│       └── pet_pm/ …       ← from derive_pet.py
 ├── latest/
-│   └── _LATEST_RUN         ← contains "2026040300"
+│   └── _LATEST_RUN         ← contains "2026040300" (finalize only)
 └── spatial_index.json
 ```
 
@@ -273,9 +271,9 @@ Then add `new_param` to the matrix in [.github/workflows/main.yml](.github/workf
 ### ETL pipeline failure
 
 1. Check the failed GitHub Actions run — the parameter job logs show exactly which step/URL failed.
-2. If a single parameter failed, re-trigger the workflow with `workflow_dispatch` and the same `run_date` + `model_run`. The idempotent design will re-stage only what's missing.
+2. If a single parameter failed, re-trigger the workflow with `workflow_dispatch` and the same `run_date` + `model_run`. The idempotent design will re-upload only missing params under `runs/`.
 3. If all parameters failed, check DWD opendata availability — releases sometimes run late.
-4. `_SUCCESS` markers confirm which parameters are already staged; ETL skips re-upload on retry.
+4. `_SUCCESS` under `runs/{run}/{param}/` confirms which parameters finished; partial runs still need a successful promote (`_PROMOTED`) before finalize.
 
 ### Validation failure
 
@@ -287,17 +285,13 @@ Alert webhook fires with diagnostic details (which parameter, which check failed
 
 Usually means `/latest/_LATEST_RUN` is missing — the ETL has never completed successfully. Run a manual ETL to seed the first run.
 
-### Blosc decompression in Worker
+### Manual finalize
 
-The Worker's `decompressChunk` function includes a structural placeholder for Blosc/zstd decompression. For production, choose one:
+`etl.py --finalize` requires `runs/{run}/_PROMOTED` from a successful `etl.py --validate-only` on that same `run_dt` (CI promote job writes it). Run validate before finalize, or the finalize step will refuse.
 
-**Option A (recommended):** Package `numcodecs-wasm` or a Blosc WASM build alongside the Worker.
+### Compression
 
-**Option B:** Change the ETL compressor to gzip, which is natively supported by Workers' `DecompressionStream`:
-```python
-# etl.py — replace compressor
-compressor = zarr.GZip(level=5)
-```
+ETL uses **GZip level 5** (`numcodecs.GZip`); the Worker decompresses chunks with `DecompressionStream("gzip")`.
 
 ---
 
@@ -319,7 +313,7 @@ Ensemble processing multiplies storage/compute by ~40×.
 
 - [x] Fully serverless — no persistent VMs or containers
 - [x] Fault-tolerant — 3 retries, exponential backoff, no data loss on failure
-- [x] Cost-efficient — Blosc/zstd compression, 2-run retention, chunk-level reads
+- [x] Cost-efficient — GZip chunk compression, configurable run retention, chunk-level reads
 - [x] Globally scalable — Cloudflare edge network
 - [x] Production-ready — observability, alerting, security, idempotency
-- [x] Correct grid handling — icosahedral → 0.125° lat/lon via CDO remapbil
+- [x] Correct grid handling — icosahedral → 0.125° lat/lon via CDO remap + precomputed weights
