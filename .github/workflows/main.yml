@@ -2,11 +2,10 @@ name: ICON Global Weather ETL
 
 on:
   schedule:
-    # 4 daily runs — ~5h after model init, giving ~2h buffer after DWD publishes (~04–05Z/10–11Z/…)
-    - cron: "15 3  * * *"   # 00Z model run  (init 00Z, DWD done ~04–05Z, trigger 07:15Z)
-    - cron: "15 9 * * *"   # 06Z model run  (init 06Z, DWD done ~10–11Z, trigger 13:15Z)
-    - cron: "15 13 * * *"   # 12Z model run  (init 12Z, DWD done ~16–17Z, trigger 19:15Z)
-    - cron: "15 19  * * *"   # 18Z model run  (init 18Z, DWD done ~22–23Z, trigger 01:15Z)
+    # Poll hourly.  `resolve-run` short-circuits the workflow when DWD has no
+    # newer run than the one already in /latest/_LATEST_RUN, so the heavy jobs
+    # only fire right after each new DWD publish (~04–05Z, ~10–11Z, …).
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       model_run:
@@ -53,9 +52,10 @@ jobs:
     name: Resolve model run
     runs-on: ubuntu-latest
     outputs:
-      model_run: ${{ steps.detect.outputs.MODEL_RUN }}
-      run_date:  ${{ steps.detect.outputs.RUN_DATE }}
-      image:     ${{ steps.image.outputs.IMAGE }}
+      model_run:  ${{ steps.detect.outputs.MODEL_RUN }}
+      run_date:   ${{ steps.detect.outputs.RUN_DATE }}
+      image:      ${{ steps.image.outputs.IMAGE }}
+      should_run: ${{ steps.gate.outputs.SHOULD_RUN }}
     steps:
       - name: Checkout (to inspect commit for Dockerfile changes)
         uses: actions/checkout@v4
@@ -161,6 +161,38 @@ jobs:
           echo "RUN_DATE=$RUN_DATE"   >> "$GITHUB_OUTPUT"
           echo "Resolved: MODEL_RUN=$MODEL_RUN  RUN_DATE=$RUN_DATE"
 
+      - name: Gate on /latest/_LATEST_RUN (skip if already promoted)
+        id: gate
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION:    auto
+          CF_ACCOUNT_ID:         ${{ secrets.CF_ACCOUNT_ID }}
+          CANDIDATE: ${{ steps.detect.outputs.RUN_DATE }}${{ steps.detect.outputs.MODEL_RUN }}
+        run: |
+          set -euo pipefail
+
+          # Manual dispatches always run — the operator asked for it.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual dispatch — bypassing already-promoted gate."
+            echo "SHOULD_RUN=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          CURRENT=$(aws --endpoint-url "$ENDPOINT" \
+                        s3 cp s3://icon-global-databank/latest/_LATEST_RUN - 2>/dev/null \
+                        | tr -d ' \n\r' || true)
+          echo "candidate=${CANDIDATE}  /latest/_LATEST_RUN=${CURRENT:-<empty>}"
+
+          if [ -n "$CURRENT" ] && [ "$CURRENT" = "$CANDIDATE" ]; then
+            echo "Run ${CANDIDATE} is already promoted — skipping downstream jobs."
+            echo "SHOULD_RUN=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Run ${CANDIDATE} is new (latest=${CURRENT:-none}) — proceeding."
+            echo "SHOULD_RUN=true" >> "$GITHUB_OUTPUT"
+          fi
+
   # =========================================================================
   # Job 1a: Build CDO remap assets once (cached across workflow runs).
   # The native grid + derived weights are static, so cache hit rate is ~100%.
@@ -168,6 +200,7 @@ jobs:
   build-assets:
     name: Build CDO remap assets
     needs: resolve-run
+    if: needs.resolve-run.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.resolve-run.outputs.image }}
@@ -278,6 +311,7 @@ jobs:
   probe:
     name: "Probe DWD · ${{ needs.resolve-run.outputs.model_run }}Z"
     needs: [resolve-run]
+    if: needs.resolve-run.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.resolve-run.outputs.image }}
@@ -313,6 +347,7 @@ jobs:
   etl:
     name: "ETL · ${{ matrix.parameter }} · ${{ needs.resolve-run.outputs.model_run }}Z"
     needs: [resolve-run, build-assets, probe]
+    if: needs.resolve-run.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.resolve-run.outputs.image }}
@@ -321,7 +356,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     strategy:
-      max-parallel: 4
+      max-parallel: 5
       matrix:
         parameter:
           - t_2m
@@ -412,8 +447,9 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    # Run even if some matrix jobs failed so we can send a clear failure alert
-    if: always()
+    # Run even if some matrix jobs failed so we can send a clear failure alert,
+    # but skip entirely when the gate short-circuited the workflow.
+    if: always() && needs.resolve-run.outputs.should_run == 'true'
 
     steps:
       - name: Check ETL job outcome

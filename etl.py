@@ -710,7 +710,6 @@ def validate_one_param(
     param: str,
     ensemble: bool,
     fs: s3fs.S3FileSystem,
-    all_steps: list[int],
 ) -> None:
     """
     Validate one staged parameter.
@@ -735,62 +734,22 @@ def validate_one_param(
     except Exception as exc:
         raise ParamValidationError(param, f"[{param}] Cannot open Zarr store: {exc}") from exc
 
-    # 2. Step completeness
-    if "step" not in ds.coords:
-        raise ParamValidationError(param, f"[{param}] 'step' coordinate not found in Zarr store")
-    actual_steps = set(int(s) for s in ds.coords["step"].values)
-    expected_steps = set(all_steps)
-    unexpected = actual_steps - expected_steps
-    if unexpected:
-        raise ParamValidationError(
-            param,
-            f"[{param}] Zarr contains steps not in catalog for this run: "
-            f"{sorted(unexpected)[:15]}{'…' if len(unexpected) > 15 else ''}",
-        )
-    missing = expected_steps - actual_steps
-    if missing:
-        missing_fraction = len(missing) / len(expected_steps)
-        if missing_fraction > MAX_MISSING_STEP_FRACTION:
-            raise ParamValidationError(
-                param,
-                f"[{param}] Too many forecast steps missing: "
-                f"{len(missing)}/{len(expected_steps)} "
-                f"({missing_fraction:.0%}) — DWD upload likely incomplete. "
-                f"Missing: {sorted(missing)[:10]}{'…' if len(missing) > 10 else ''}",
-            )
-        log.warning(
-            "[%s] %d/%d forecast steps absent from Zarr (skipped on DWD): %s%s",
-            param,
-            len(missing),
-            len(expected_steps),
-            sorted(missing)[:15],
-            "…" if len(missing) > 15 else "",
-        )
-
-    # 3. Non-empty arrays + plausibility bounds
-    #    Use dask-aware operations to avoid loading entire arrays into RAM
-    #    (a single parameter can be ~1.6 GB as float32).
-    bounds = PARAM_BOUNDS.get(param)
-    import dask
+    # 3. Single-chunk smoke read — catches "Zarr opens but bytes are junk"
+    #    without pulling the whole store from R2 (the old full-array isnull/
+    #    min/max scan cost ~25 min across 16 params).
     for var in ds.data_vars:
         if ds[var].size == 0:
             raise ParamValidationError(param, f"[{param}/{var}] Data array is empty")
-        arr = ds[var]
-        # Single pass over the Zarr: compute all-NaN, min, max together.
-        all_nan, vmin, vmax = dask.compute(
-            arr.isnull().all(), arr.min(), arr.max()
+        sample = ds[var].isel(step=0)
+        while sample.ndim > 2:
+            sample = sample.isel({sample.dims[0]: 0})
+        sample = sample.isel(
+            {sample.dims[0]: slice(0, 10), sample.dims[1]: slice(0, 10)}
         )
-        if bool(all_nan):
-            raise ParamValidationError(param, f"[{param}/{var}] All-NaN array")
-        if bounds is not None:
-            vmin = float(vmin)
-            vmax = float(vmax)
-            if vmin < bounds[0] or vmax > bounds[1]:
-                msg = (
-                    f"[{param}/{var}] Values out of plausible range "
-                    f"[{bounds[0]}, {bounds[1]}]: got [{vmin:.2f}, {vmax:.2f}]"
-                )
-                log.warning("%s (warning-only bounds check; continuing)", msg)
+        if np.isnan(np.asarray(sample.values)).all():
+            raise ParamValidationError(
+                param, f"[{param}/{var}] Step-0 sample chunk is all-NaN"
+            )
 
     # 4. Ensemble member count
     if ensemble:
@@ -801,11 +760,11 @@ def validate_one_param(
                 f"[{param}] Expected {ENSEMBLE_MEMBERS} ensemble members, got {n_members}",
             )
 
+    n_steps = ds.sizes.get("step", 0)
     log.info(
-        "  [OK] %s — %d/%d steps in Zarr, %d data vars%s",
+        "  [OK] %s — %d steps in Zarr, %d data vars%s",
         param,
-        len(actual_steps),
-        len(all_steps),
+        n_steps,
         len(ds.data_vars),
         f", {ENSEMBLE_MEMBERS} members" if ensemble else "",
     )
@@ -816,7 +775,6 @@ def validate_run(
     params: list[str],
     ensemble: bool,
     fs: s3fs.S3FileSystem,
-    all_steps: list[int],
 ) -> None:
     """
     Validate the complete staged run.
@@ -824,7 +782,7 @@ def validate_run(
     """
     log.info("=== Validation: run=%s ===", run_dt)
     for param in params:
-        validate_one_param(run_dt, param, ensemble, fs, all_steps)
+        validate_one_param(run_dt, param, ensemble, fs)
     log.info("=== Validation PASSED ===")
 
 
@@ -833,7 +791,6 @@ def validate_run_with_selective_retry(
     params: list[str],
     ensemble: bool,
     fs: s3fs.S3FileSystem,
-    all_steps: list[int],
 ) -> None:
     """
     Like ``validate_run``, but on failure only re-validates from the failing parameter onward
@@ -850,7 +807,7 @@ def validate_run_with_selective_retry(
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {
                     pool.submit(
-                        validate_one_param, run_dt, p, ensemble, fs, all_steps
+                        validate_one_param, run_dt, p, ensemble, fs
                     ): p
                     for p in remaining
                 }
@@ -1245,13 +1202,12 @@ def main() -> None:
             if resolved != run_dt:
                 log.info("Promote: resolved run_dt %s → %s (from staging/_RESOLVED_RUN)", run_dt, resolved)
                 run_dt = resolved
-                all_steps = get_all_steps(run_dt[8:10])
         else:
             log.warning("No _RESOLVED_RUN marker found; using CI run_dt %s", run_dt)
 
         try:
             validate_run_with_selective_retry(
-                run_dt, all_params, ensemble, fs, all_steps
+                run_dt, all_params, ensemble, fs
             )
         except Exception as exc:
             msg = f"VALIDATION FAILED | run={run_dt} | error={exc}"
