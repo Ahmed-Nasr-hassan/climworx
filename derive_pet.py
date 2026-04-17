@@ -17,6 +17,7 @@ import argparse
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import s3fs
 import xarray as xr
@@ -28,6 +29,8 @@ CHUNK_LAT = 100
 CHUNK_LON = 100
 
 REQUIRED_PARAMS = ["t_2m", "td_2m", "u_10m", "v_10m", "asob_s", "athb_s", "ps"]
+# Parallel Zarr opens (metadata + chunk map); R2 latency dominates.
+PET_LOAD_WORKERS = int(os.environ.get("PET_LOAD_WORKERS", "7"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -225,9 +228,14 @@ def main() -> None:
     log.info("Derive PET for run=%s", run_dt)
 
     loaded: dict[str, xr.DataArray] = {}
-    for p in REQUIRED_PARAMS:
-        loaded[p] = load_param(fs, run_dt, p)
-        log.info("Loaded %s", p)
+    with ThreadPoolExecutor(max_workers=min(PET_LOAD_WORKERS, len(REQUIRED_PARAMS))) as pool:
+        future_map = {
+            pool.submit(load_param, fs, run_dt, p): p for p in REQUIRED_PARAMS
+        }
+        for fut in as_completed(future_map):
+            p = future_map[fut]
+            loaded[p] = fut.result()
+            log.info("Loaded %s", p)
 
     asob_inst = deaccumulate_since_init(loaded["asob_s"])
     athb_inst = deaccumulate_since_init(loaded["athb_s"])

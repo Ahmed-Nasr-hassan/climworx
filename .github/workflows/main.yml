@@ -356,7 +356,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     strategy:
-      max-parallel: 5
+      max-parallel: 16
       matrix:
         parameter:
           - t_2m
@@ -432,10 +432,10 @@ jobs:
           if-no-files-found: ignore
 
   # =========================================================================
-  # Job 3: Validate + Promote staging → runs/ (NO pointer flip, NO janitor)
+  # Job 3: Validate matrix output under runs/ + write _PROMOTED (NO pointer flip)
   # =========================================================================
   promote:
-    name: "Validate · Promote · ${{ needs.resolve-run.outputs.model_run }}Z"
+    name: "Validate · _PROMOTED · ${{ needs.resolve-run.outputs.model_run }}Z"
     outputs:
       params: ${{ steps.discover.outputs.params }}
     needs:
@@ -455,19 +455,19 @@ jobs:
       - name: Check ETL job outcome
         run: |
           # Abort only if the matrix was cancelled — partial failures are OK
-          # because we discover successfully-staged params from R2 below.
+          # because we discover params with _SUCCESS under runs/ below.
           if [ "${{ needs.etl.result }}" = "cancelled" ]; then
             echo "::error::ETL matrix was cancelled. Aborting promotion."
             exit 1
           fi
           if [ "${{ needs.etl.result }}" != "success" ]; then
-            echo "::warning::Some ETL parameter jobs failed — will promote only params with _SUCCESS markers."
+            echo "::warning::Some ETL parameter jobs failed — will validate only params with _SUCCESS under runs/."
           fi
 
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Discover successfully staged parameters
+      - name: Discover parameters with matrix _SUCCESS under runs/
         id: discover
         env:
           CF_ACCOUNT_ID:        ${{ secrets.CF_ACCOUNT_ID }}
@@ -479,33 +479,39 @@ jobs:
           ALL_PARAMS="t_2m tot_prec u_10m v_10m pmsl clct relhum_2m aswdir_s td_2m vmax_10m asob_s athb_s alhfl_s ps runoff_s runoff_g"
           python - <<'PY' "$RUN_DATE$MODEL_RUN" $ALL_PARAMS
           import os, sys, s3fs
-          run_dt, *params = sys.argv[1:]
+          ci_run, *params = sys.argv[1:]
           fs = s3fs.S3FileSystem(
               key=os.environ["R2_ACCESS_KEY_ID"],
               secret=os.environ["R2_SECRET_ACCESS_KEY"],
               client_kwargs={"endpoint_url": f"https://{os.environ['CF_ACCOUNT_ID']}.r2.cloudflarestorage.com"},
           )
-          ok = [p for p in params if fs.exists(f"icon-global-databank/staging/{run_dt}/{p}/_SUCCESS")]
+          resolved = ci_run
+          marker = f"icon-global-databank/staging/{ci_run}/_RESOLVED_RUN"
+          if fs.exists(marker):
+              with fs.open(marker) as f:
+                  resolved = (f.read().decode().strip() or ci_run)
+          ok = [p for p in params if fs.exists(f"icon-global-databank/runs/{resolved}/{p}/_SUCCESS")]
           missing = [p for p in params if p not in ok]
-          print(f"Staged OK ({len(ok)}): {ok}")
-          print(f"Missing  ({len(missing)}): {missing}")
+          print(f"CI run key={ci_run}  data run={resolved}")
+          print(f"runs/ OK ({len(ok)}): {ok}")
+          print(f"Missing ({len(missing)}): {missing}")
           if not ok:
-              print("::error::No parameters staged successfully — nothing to promote.")
+              print("::error::No parameters finished upload to runs/ — nothing to validate.")
               sys.exit(1)
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"params={' '.join(ok)}\n")
               f.write(f"missing={' '.join(missing)}\n")
           PY
 
-      - name: Validate + Promote + Janitor
+      - name: Validate + write _PROMOTED
         env:
           MODEL_RUN: ${{ needs.resolve-run.outputs.model_run }}
           RUN_DATE:  ${{ needs.resolve-run.outputs.run_date }}
           PROMOTE_PARAMS: ${{ steps.discover.outputs.params }}
         run: |
           START=$(date -u +%s)
-          echo "::group::Validation & Promotion — run=${RUN_DATE}${MODEL_RUN}"
-          echo "Promoting params: $PROMOTE_PARAMS"
+          echo "::group::Validation & _PROMOTED — run=${RUN_DATE}${MODEL_RUN}"
+          echo "Params: $PROMOTE_PARAMS"
 
           ENSEMBLE_FLAG=""
           if [ "$ENABLE_ENSEMBLE" = "true" ]; then
@@ -522,7 +528,7 @@ jobs:
 
           END=$(date -u +%s)
           echo "::endgroup::"
-          echo "Validation + Promotion duration: $((END - START))s"
+          echo "Validation duration: $((END - START))s"
 
       - name: Alert on validation/promotion failure
         if: failure()

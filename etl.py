@@ -6,8 +6,10 @@ Fetches ICON Global / ICON-EPS GRIB2 data from DWD opendata,
 regrids from the native icosahedral grid to a 0.125° regular lat/lon grid,
 converts to Cloud-Optimized Zarr, and uploads to Cloudflare R2.
 
-3-Phase Workflow: staging → validation → promotion
-Janitor: safe cleanup of old runs post-success
+Workflow: matrix-write → validate → derive → finalize
+  Each matrix job writes directly to runs/{run_dt}/{param}/ and writes a
+  per-param _SUCCESS marker. The dashboard only sees the run after finalize
+  flips /latest/_LATEST_RUN. Janitor sweeps old runs post-success.
 
 Usage (environment variables):
   PARAMETER         = tot_prec
@@ -77,6 +79,8 @@ MAX_MISSING_STEP_FRACTION = 0.15
 RETRY_BASE_S = 30
 RETRY_MAX_S = 300
 BUCKET = "icon-global-databank"
+# Written by ``--validate-only`` after smoke validation (matrix data already lives under runs/).
+PROMOTED_RELATIVE = "_PROMOTED"
 
 # Physical plausibility bounds per parameter (min, max)
 PARAM_BOUNDS: dict[str, tuple[float, float]] = {
@@ -431,6 +435,7 @@ def regrid_grib_bytes(
 
         cmd = [
             "cdo",
+            "-s",
             "-f", "nc4",
             f"remap,{target_grid},{weights}",
             str(src),
@@ -461,6 +466,12 @@ def regrid_grib_bytes(
     data_vars = list(ds.data_vars)
     if len(data_vars) == 1 and data_vars[0] != param:
         ds = ds.rename({data_vars[0]: param})
+
+    # Drop CF cell-bounds aux arrays (e.g. depth_bnds). They are not forecast grids,
+    # bloat Zarr (extra compressed arrays + metadata), and are unused by the Worker.
+    bnds_aux = [v for v in ds.data_vars if v.endswith("_bnds")]
+    if bnds_aux:
+        ds = ds.drop_vars(bnds_aux)
 
     # Ensure north-to-south latitude ordering (Worker expects index 0 = 90°N)
     if "latitude" in ds.coords and ds.latitude.values[0] < ds.latitude.values[-1]:
@@ -495,7 +506,8 @@ def make_chunks(ensemble: bool) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
-DOWNLOAD_WORKERS = 6       # parallel GRIB download threads per matrix job
+# Parallel GRIB download threads per matrix job (override with ETL_DOWNLOAD_WORKERS).
+DOWNLOAD_WORKERS = int(os.environ.get("ETL_DOWNLOAD_WORKERS", "6"))
 DOWNLOAD_INTERVAL = 0.15   # seconds between request starts (throttle)
 
 
@@ -577,10 +589,10 @@ def process_deterministic(
 
     # Phase 2: regrid from downloaded bytes (sequential — CDO is CPU-bound)
     step_datasets: list[xr.Dataset] = []
-    for step in sorted(downloaded):
+    ordered_steps = sorted(s for s, raw in downloaded.items() if raw is not None)
+    n_ord = len(ordered_steps)
+    for i, step in enumerate(ordered_steps):
         raw = downloaded[step]
-        if raw is None:
-            continue
 
         def _regrid(r=raw, p=param, s=step):
             ds = regrid_grib_bytes(r, p)
@@ -588,7 +600,10 @@ def process_deterministic(
 
         ds_step = with_retry(_regrid, label=f"regrid/{param}/step={step}")
         step_datasets.append(ds_step)
-        log.info("  [det] %s step=%d regridded (%d vars)", param, step, len(ds_step.data_vars))
+        if i == 0 or i == n_ord - 1 or (i + 1) % 20 == 0:
+            log.info("  [det] %s step=%d regridded (%d vars)", param, step, len(ds_step.data_vars))
+        else:
+            log.debug("  [det] %s step=%d regridded (%d vars)", param, step, len(ds_step.data_vars))
 
     if not step_datasets:
         raise RuntimeError(
@@ -656,40 +671,51 @@ def process_ensemble(
         ds_member = xr.concat(step_datasets, dim="step")
         ds_member = ds_member.expand_dims({"realization": [member_idx]})
         member_datasets.append(ds_member)
-        log.info("  [eps] %s member=%d complete (%d steps)", param, member_idx, len(step_datasets))
+        log.debug("  [eps] %s member=%d complete (%d steps)", param, member_idx, len(step_datasets))
 
-    return xr.concat(member_datasets, dim="realization")
+    out = xr.concat(member_datasets, dim="realization")
+    log.info(
+        "  [eps] %s: merged %d members × %d steps",
+        param,
+        len(member_datasets),
+        len(member_step_lists[0]) if member_step_lists[0] else 0,
+    )
+    return out
 
 
-def upload_to_staging(
+def upload_to_run_store(
     ds: xr.Dataset,
     run_dt: str,
     param: str,
     ensemble: bool,
     fs: s3fs.S3FileSystem,
 ) -> str:
-    """Chunk, compress, and upload Dataset to staging path. Returns the staging path."""
+    """Chunk, compress, and upload Dataset directly to runs/{run_dt}/{param}/.
+
+    The /latest/_LATEST_RUN pointer only flips in finalize, so writing straight
+    under runs/ is safe: the Worker won't see this run until spatial_index +
+    pointer flip, and a failed write is cleaned up by cleanup_failed_run_data.
+    """
     chunks = make_chunks(ensemble)
     ds = ds.chunk(chunks)
     encoding = make_encoding(ds)
 
-    staging_path = f"{BUCKET}/staging/{run_dt}/{param}"
-    store = s3fs.S3Map(root=staging_path, s3=fs, check=False)
+    store_path = f"{BUCKET}/runs/{run_dt}/{param}"
+    store = s3fs.S3Map(root=store_path, s3=fs, check=False)
 
-    log.info("Uploading %s → s3://%s …", param, staging_path)
+    log.info("Uploading %s → s3://%s …", param, store_path)
 
     def _write_zarr():
         ds.to_zarr(store, mode="w", consolidated=True, encoding=encoding, zarr_format=2)
 
     with_retry(_write_zarr, label=f"upload/{param}")
 
-    # Write _SUCCESS marker for this parameter
-    marker_key = f"{staging_path}/_SUCCESS"
+    marker_key = f"{store_path}/_SUCCESS"
     with fs.open(marker_key, "w") as f:
         f.write(datetime.now(timezone.utc).isoformat())
     log.info("_SUCCESS marker written: %s", marker_key)
 
-    return staging_path
+    return store_path
 
 
 # ---------------------------------------------------------------------------
@@ -715,18 +741,18 @@ def validate_one_param(
     Validate one staged parameter.
     Raises ParamValidationError with ``.param`` set so callers can retry from that index only.
     """
-    staging_path = f"{BUCKET}/staging/{run_dt}/{param}"
+    store_path = f"{BUCKET}/runs/{run_dt}/{param}"
 
-    # 1. _SUCCESS marker — fail fast if staging upload was interrupted
-    marker = f"{staging_path}/_SUCCESS"
+    # 1. _SUCCESS marker — fail fast if the matrix job's upload was interrupted
+    marker = f"{store_path}/_SUCCESS"
     if not fs.exists(marker):
         raise ParamValidationError(
             param,
             f"[{param}] _SUCCESS marker missing at {marker} — "
-            "staging upload likely incomplete or ETL job failed",
+            "matrix upload likely incomplete or ETL job failed",
         )
 
-    store = s3fs.S3Map(root=staging_path, s3=fs, check=False)
+    store = s3fs.S3Map(root=store_path, s3=fs, check=False)
 
     # 2. Zarr store readable (consolidated metadata)
     try:
@@ -734,40 +760,52 @@ def validate_one_param(
     except Exception as exc:
         raise ParamValidationError(param, f"[{param}] Cannot open Zarr store: {exc}") from exc
 
-    # 3. Single-chunk smoke read — catches "Zarr opens but bytes are junk"
-    #    without pulling the whole store from R2 (the old full-array isnull/
-    #    min/max scan cost ~25 min across 16 params).
-    for var in ds.data_vars:
-        if ds[var].size == 0:
-            raise ParamValidationError(param, f"[{param}/{var}] Data array is empty")
-        sample = ds[var].isel(step=0)
-        while sample.ndim > 2:
-            sample = sample.isel({sample.dims[0]: 0})
-        sample = sample.isel(
-            {sample.dims[0]: slice(0, 10), sample.dims[1]: slice(0, 10)}
-        )
-        if np.isnan(np.asarray(sample.values)).all():
-            raise ParamValidationError(
-                param, f"[{param}/{var}] Step-0 sample chunk is all-NaN"
-            )
-
-    # 4. Ensemble member count
-    if ensemble:
-        n_members = ds.dims.get("realization", 0)
-        if n_members != ENSEMBLE_MEMBERS:
+    try:
+        # 3. Single-chunk smoke read on the served forecast field only — fast
+        #    (one small R2 read per param) and matches what the Worker exposes.
+        #    Regrid drops *_bnds today; still skip them for older stores.
+        if param in ds.data_vars:
+            vars_to_check = [param]
+        else:
+            vars_to_check = [v for v in ds.data_vars if not v.endswith("_bnds")]
+        if not vars_to_check:
             raise ParamValidationError(
                 param,
-                f"[{param}] Expected {ENSEMBLE_MEMBERS} ensemble members, got {n_members}",
+                f"[{param}] No gridded data variables (only *_bnds aux or empty store?)",
             )
+        for var in vars_to_check:
+            if ds[var].size == 0:
+                raise ParamValidationError(param, f"[{param}/{var}] Data array is empty")
+            sample = ds[var].isel(step=0)
+            while sample.ndim > 2:
+                sample = sample.isel({sample.dims[0]: 0})
+            sample = sample.isel(
+                {sample.dims[0]: slice(0, 10), sample.dims[1]: slice(0, 10)}
+            )
+            if np.isnan(np.asarray(sample.values)).all():
+                raise ParamValidationError(
+                    param, f"[{param}/{var}] Step-0 sample chunk is all-NaN"
+                )
 
-    n_steps = ds.sizes.get("step", 0)
-    log.info(
-        "  [OK] %s — %d steps in Zarr, %d data vars%s",
-        param,
-        n_steps,
-        len(ds.data_vars),
-        f", {ENSEMBLE_MEMBERS} members" if ensemble else "",
-    )
+        # 4. Ensemble member count
+        if ensemble:
+            n_members = ds.dims.get("realization", 0)
+            if n_members != ENSEMBLE_MEMBERS:
+                raise ParamValidationError(
+                    param,
+                    f"[{param}] Expected {ENSEMBLE_MEMBERS} ensemble members, got {n_members}",
+                )
+
+        n_steps = ds.sizes.get("step", 0)
+        log.info(
+            "  [OK] %s — %d steps in Zarr, %d data vars%s",
+            param,
+            n_steps,
+            len(ds.data_vars),
+            f", {ENSEMBLE_MEMBERS} members" if ensemble else "",
+        )
+    finally:
+        ds.close()
 
 
 def validate_run(
@@ -837,64 +875,62 @@ def validate_run_with_selective_retry(
             time.sleep(wait)
 
 
-# ---------------------------------------------------------------------------
-# Promotion
-# ---------------------------------------------------------------------------
-
-
-def promote_run(
+def write_promoted_marker(
     run_dt: str,
     params: list[str],
     fs: s3fs.S3FileSystem,
 ) -> None:
-    """Move validated staging data to /runs/{run_dt}/.
+    """Record that base-layer smoke validation passed (promote CI job)."""
+    key = f"{BUCKET}/runs/{run_dt}/{PROMOTED_RELATIVE}"
+    payload = json.dumps(
+        {
+            "run": run_dt,
+            "params": sorted(params),
+            "validated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        separators=(",", ":"),
+    )
+    with fs.open(key, "w") as f:
+        f.write(payload)
+    log.info("Promoted marker written: s3://%s", key)
 
-    Does NOT flip /latest/_LATEST_RUN — that happens in ``finalize_run`` after
-    downstream derivations (e.g. PET) have written their own layers, so the
-    dashboard never sees a run with a partial set of layers.
+
+def cleanup_legacy_staging_dirs(
+    ci_run_dt: str,
+    resolved_run_dt: str,
+    params: list[str],
+    fs: s3fs.S3FileSystem,
+) -> None:
     """
-    log.info("=== Promoting run=%s ===", run_dt)
+    Best-effort removal of pre-direct-write ``staging/{{run}}/{{param}}/`` trees.
+    Parallelized because R2 latency dominates.
+    """
+    prefixes = {resolved_run_dt}
+    if ci_run_dt != resolved_run_dt:
+        prefixes.add(ci_run_dt)
+    paths = [f"{BUCKET}/staging/{rid}/{param}" for rid in prefixes for param in params]
+    if not paths:
+        return
 
-    cleanup_failures: list[str] = []
-    for param in params:
-        src = f"{BUCKET}/staging/{run_dt}/{param}"
-        dst = f"{BUCKET}/runs/{run_dt}/{param}"
-        log.info("  Copying %s → %s", src, dst)
-        fs.copy(src, dst, recursive=True)
+    def _rm_one(prefix: str) -> None:
+        if not fs.exists(prefix):
+            return
+        fs.rm(prefix, recursive=True)
+        log.info("Removed legacy staging: s3://%s", prefix)
 
-        # Write _SUCCESS in promoted path
-        with fs.open(f"{dst}/_SUCCESS", "w") as f:
-            f.write(datetime.now(timezone.utc).isoformat())
+    max_workers = min(8, len(paths))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_rm_one, pth) for pth in paths]
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as exc:
+                log.warning("Legacy staging cleanup: %s", exc)
 
-        # Delete staging copy now that runs/ holds the data — avoids the
-        # duplicate-storage window that used to last until the next janitor.
-        log.info("  Removing staged copy %s", src)
-        try:
-            fs.rm(src, recursive=True)
-        except Exception as exc:
-            log.warning("  Failed to remove staging %s: %s", src, exc)
-            cleanup_failures.append(param)
 
-    # Tolerate a flaky single-param cleanup (often a dataset-limit quirk) but
-    # fail loudly if *every* cleanup failed — that's a systemic issue (auth,
-    # permissions, R2 outage) and silently leaking a whole run's staging is
-    # the bug this change was meant to prevent.
-    if cleanup_failures and len(cleanup_failures) == len(params):
-        raise RuntimeError(
-            f"All {len(params)} staging cleanups failed for run={run_dt}; "
-            f"aborting to avoid silent storage drift. Params: {cleanup_failures}"
-        )
-    if cleanup_failures:
-        log.warning(
-            "Staging cleanup partially failed for run=%s: %d/%d params (%s) — "
-            "continuing; janitor will sweep leftovers next cycle.",
-            run_dt, len(cleanup_failures), len(params), cleanup_failures,
-        )
-
-    # Intentionally leave staging/{run_dt}/_RESOLVED_RUN in place so the later
-    # --finalize invocation can discover the resolved run id. Janitor sweeps
-    # the empty staging dir on the next cycle.
-    log.info("=== Promotion COMPLETE (pointer flip deferred to finalize) ===")
+# ---------------------------------------------------------------------------
+# Finalization (pointer flip + spatial_index + janitor)
+# ---------------------------------------------------------------------------
 
 
 def finalize_run(
@@ -905,11 +941,18 @@ def finalize_run(
 ) -> None:
     """Flip /latest pointer, (re)build spatial_index, run janitor.
 
-    Called after promote_run AND any downstream derivations (PET, etc.) have
-    written under runs/{run_dt}/. ``params`` should include every layer the
-    dashboard expects (pet_pm included).
+    Called after the promote (validate-only) job AND any downstream derivations
+    (PET, etc.) have written under runs/{run_dt}/. ``params`` should include
+    every layer the dashboard expects (pet_pm included).
     """
     log.info("=== Finalizing run=%s ===", run_dt)
+
+    promoted_key = f"{BUCKET}/runs/{run_dt}/{PROMOTED_RELATIVE}"
+    if not fs.exists(promoted_key):
+        raise RuntimeError(
+            f"Refusing to finalize run={run_dt}: missing {promoted_key} — "
+            "run etl.py --validate-only (promote job) first so base layers are validated."
+        )
 
     # Hard guard: every advertised param must have a _SUCCESS marker under
     # runs/{run_dt}/{param}/. Protects out-of-band invocations (manual reruns,
@@ -949,7 +992,7 @@ def build_spatial_index(run_dt: str, params: list[str], fs: s3fs.S3FileSystem) -
     ``steps`` are taken from the first readable promoted Zarr (matches skipped DWD steps).
     """
     # Invalidate the s3fs listing/content cache for the promoted paths so we
-    # don't read stale consolidated metadata written before the copy in promote_run.
+    # don't read stale consolidated metadata after matrix uploads / PET writes.
     fs.invalidate_cache(f"{BUCKET}/runs/{run_dt}")
 
     steps_in_store: list[int] = []
@@ -1069,7 +1112,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--validate-only",
         action="store_true",
-        help="Run validation + promotion (copy staging→runs, cleanup staging). "
+        help="Smoke-validate Zarr under runs/{run}/{param}/, write runs/{run}/_PROMOTED, "
+             "best-effort remove legacy staging/{run}/{param}/ mirrors. "
              "Does NOT flip /latest or run janitor — use --finalize for that.",
     )
     p.add_argument(
@@ -1162,11 +1206,11 @@ def main() -> None:
             else:
                 ds = process_deterministic(run_dt, param, fs, all_steps, available_steps)
 
-            staging_path = upload_to_staging(ds, run_dt, param, ensemble, fs)
+            store_path = upload_to_run_store(ds, run_dt, param, ensemble, fs)
 
-            # Write _RESOLVED_RUN under the *original* CI run_dt path so the
-            # validation job (which only knows the CI run_dt) can discover
-            # which run was actually staged when DWD fallback occurred.
+            # Write _RESOLVED_RUN under the *original* CI run_dt path so
+            # downstream jobs (which only know the CI run_dt) can discover
+            # which run was actually written when DWD fallback occurred.
             if original_run_dt != run_dt:
                 resolved_key = f"{BUCKET}/staging/{original_run_dt}/_RESOLVED_RUN"
                 with fs.open(resolved_key, "w") as f:
@@ -1175,8 +1219,8 @@ def main() -> None:
 
             elapsed = time.monotonic() - t0
             log.info(
-                "Staging complete: %s  (%.1fs, %.1f MB in-memory)",
-                staging_path, elapsed,
+                "Upload complete: %s  (%.1fs, %.1f MB in-memory)",
+                store_path, elapsed,
                 sum(ds[v].nbytes for v in ds.data_vars) / 1e6,
             )
         except Exception as exc:
@@ -1187,20 +1231,22 @@ def main() -> None:
             sys.exit(1)
 
     # ------------------------------------------------------------------
-    # Phase 3: Validation + Promotion  (triggered separately via --validate-only)
+    # Phase 3: Validation  (triggered separately via --validate-only)
+    # Data is already under runs/{run_dt}/{param}/; validation just reads
+    # the _SUCCESS markers + Zarr metadata + a single smoke-test chunk.
     # ------------------------------------------------------------------
     if args.validate_only:
         all_params = args.params or list(PARAM_BOUNDS.keys())
+        ci_run_dt = run_dt
 
-        # The ETL staging jobs may have fallen back to an older DWD run.
-        # Read the resolved run_dt they actually staged under, so validation
-        # and promotion use the correct path.
+        # The ETL matrix jobs may have fallen back to an older DWD run.
+        # Read the resolved run_dt they actually wrote under.
         resolved_key = f"{BUCKET}/staging/{run_dt}/_RESOLVED_RUN"
         if fs.exists(resolved_key):
             with fs.open(resolved_key) as f:
                 resolved = f.read().decode().strip()
             if resolved != run_dt:
-                log.info("Promote: resolved run_dt %s → %s (from staging/_RESOLVED_RUN)", run_dt, resolved)
+                log.info("Validate: resolved run_dt %s → %s (from staging/_RESOLVED_RUN)", run_dt, resolved)
                 run_dt = resolved
         else:
             log.warning("No _RESOLVED_RUN marker found; using CI run_dt %s", run_dt)
@@ -1217,15 +1263,19 @@ def main() -> None:
             sys.exit(1)
 
         try:
-            promote_run(run_dt, all_params, fs)
+            write_promoted_marker(run_dt, all_params, fs)
         except Exception as exc:
-            msg = f"PROMOTION FAILED | run={run_dt} | error={exc}"
+            msg = f"PROMOTE MARKER FAILED | run={run_dt} | error={exc}"
             log.exception(msg)
-            cleanup_failed_run_data(run_dt, all_params, fs)
             send_alert(msg)
             sys.exit(1)
 
-        log.info("Promotion complete for run=%s (finalize pending)", run_dt)
+        try:
+            cleanup_legacy_staging_dirs(ci_run_dt, run_dt, all_params, fs)
+        except Exception:
+            log.warning("Legacy staging cleanup had errors (non-fatal)", exc_info=True)
+
+        log.info("Validation complete for run=%s (finalize pending)", run_dt)
 
     # ------------------------------------------------------------------
     # Phase 4: Finalize (flip /latest, rebuild spatial_index, janitor)
