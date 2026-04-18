@@ -115,6 +115,34 @@
     body.theme-dark-panels #controls [class*="text-white/50"] {
       color: rgba(255, 255, 255, 0.74) !important;
     }
+    /* Export bar: format tabs + accent underline on selection */
+    #export-slice-wrap .export-fmt-btn { position: relative; }
+    #export-slice-wrap .export-fmt-btn[aria-selected="true"]::after {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 12%;
+      right: 12%;
+      height: 2px;
+      border-radius: 2px 2px 0 0;
+      opacity: 0.95;
+    }
+    #export-slice-wrap[data-export-fmt="zip"] #btn-export-fmt-zip[aria-selected="true"]::after {
+      background: linear-gradient(90deg, #34d399, #6ee7b7);
+    }
+    #export-slice-wrap[data-export-fmt="nc"] #btn-export-fmt-nc[aria-selected="true"]::after {
+      background: linear-gradient(90deg, #38bdf8, #7dd3fc);
+    }
+    #export-slice-wrap[data-export-fmt="gif"] #btn-export-fmt-gif[aria-selected="true"]::after {
+      background: linear-gradient(90deg, #a78bfa, #c4b5fd);
+    }
+    /* Mobile: keep controls card short; momentum scroll inside panel */
+    @media (max-width: 639.98px) {
+      #controls.controls-panel-open {
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-y: contain;
+      }
+    }
     /* Timeline slider styling */
     input[type="range"] { -webkit-appearance: none; background: transparent; }
     input[type="range"]::-webkit-slider-runnable-track {
@@ -188,7 +216,7 @@
   </button>
 
   <!-- ====== Controls Panel (top-left) ====== -->
-  <div id="controls" class="glass absolute top-14 left-2 sm:top-4 sm:left-4 z-30 rounded-2xl p-3 sm:p-4 w-56 sm:w-72 space-y-2 sm:space-y-3 shadow-2xl max-h-[calc(100vh-5rem)] overflow-y-auto hidden sm:block">
+  <div id="controls" class="glass absolute top-14 left-2 sm:top-4 sm:left-4 z-30 rounded-2xl p-2.5 sm:p-4 w-56 sm:w-72 space-y-2 sm:space-y-3 shadow-2xl max-h-[min(52dvh,calc(100dvh-9.5rem))] sm:max-h-[calc(100vh-5rem)] overflow-y-auto overflow-x-hidden min-h-0 touch-pan-y pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] hidden sm:block">
     <!-- Run info -->
     <div id="run-badge" class="text-xs text-white/50 font-mono tracking-wide">Loading...</div>
 
@@ -293,6 +321,30 @@
 
     <!-- Area info (shown when data loaded) -->
     <div id="area-info" class="text-xs text-white/40 hidden"></div>
+    <div id="export-slice-wrap" class="hidden pt-2 border-t border-white/10" data-export-fmt="zip" role="region" aria-label="Export loaded region">
+      <div class="text-[10px] uppercase tracking-wider text-white/40 mb-1.5">Export</div>
+      <div class="grid grid-cols-3 rounded-xl overflow-hidden border border-white/10 gap-px bg-white/10" role="tablist" aria-label="File format">
+        <button type="button" id="btn-export-fmt-zip" role="tab" aria-selected="true" aria-controls="export-format-hint"
+                title="ZIP — manifest, raw float32 grids, DWD attribution"
+                class="export-fmt-btn py-2.5 text-[11px] sm:text-xs font-semibold tracking-tight transition-all bg-emerald-500/20 text-emerald-100"
+                onclick="setSliceExportFormat('zip')">ZIP</button>
+        <button type="button" id="btn-export-fmt-nc" role="tab" aria-selected="false" aria-controls="export-format-hint"
+                title="NetCDF-3 classic — CF-style coordinates"
+                class="export-fmt-btn py-2.5 text-[11px] sm:text-xs font-semibold tracking-tight transition-all text-white/45 hover:text-white/80 hover:bg-white/5"
+                onclick="setSliceExportFormat('nc')">NC</button>
+        <button type="button" id="btn-export-fmt-gif" role="tab" aria-selected="false" aria-controls="export-format-hint"
+                title="Animated GIF — basemap + forecast layer (viewport), subsampled frames"
+                class="export-fmt-btn py-2.5 text-[11px] sm:text-xs font-semibold tracking-tight transition-all text-white/45 hover:text-white/80 hover:bg-white/5"
+                onclick="setSliceExportFormat('gif')">GIF</button>
+      </div>
+      <button type="button" id="btn-export-run" onclick="runSliceExportDownload()"
+              class="w-full mt-2 py-2.5 rounded-xl text-xs font-semibold border transition-all shadow-sm bg-emerald-500/15 text-emerald-100 border-emerald-400/40 hover:bg-emerald-500/25 hover:border-emerald-300/50 active:scale-[0.99]">
+        <span id="btn-export-run-label">Download ZIP</span>
+      </button>
+      <p id="export-format-hint" role="tabpanel" class="text-[9px] text-white/38 mt-1.5 leading-snug">
+        <span class="font-mono text-white/45">manifest.json</span> + raw <span class="font-mono text-white/45">.f32</span> + <span class="font-mono text-white/45">ATTRIBUTION.txt</span> (DWD · CC BY 4.0).
+      </p>
+    </div>
   </div>
 
   <!-- ====== Clock / Timestamp (top-right; drops below compass on mobile to avoid truncation) ====== -->
@@ -563,6 +615,8 @@
     let windUSliceData = null;    // Float32Array [nSteps, latPx, lonPx] for wind_10m
     let windVSliceData = null;    // Float32Array [nSteps, latPx, lonPx] for wind_10m
     let sliceBounds = null;       // { south, west, north, east, latStart, latEnd, lonStart, lonEnd, nLat, nLon }
+    /** Export panel: 'zip' | 'nc' | 'gif' — single CTA + segmented format picker */
+    let sliceExportFormat = 'zip';
     let currentStep = 0;
     let playing = false;
     let playSpeed = 1;
@@ -641,6 +695,7 @@
       panelVisible = !panelVisible;
       panel.classList.toggle('hidden', !panelVisible);
       panel.classList.toggle('sm:block', !panelVisible); // keep desktop always visible
+      panel.classList.toggle('controls-panel-open', panelVisible); // mobile scroll / overscroll hints
       iconOpen.classList.toggle('hidden', panelVisible);
       iconClose.classList.toggle('hidden', !panelVisible);
     };
@@ -1298,6 +1353,8 @@
         center: [29,31],  
         zoom: 3.5,
         attributionControl: false,
+        // Needed so GIF export can read the WebGL canvas after each frame paint.
+        preserveDrawingBuffer: true,
       });
 
       // Compass reset control — auto-hidden by MapLibre when bearing=0 & pitch=0
@@ -1583,6 +1640,7 @@
       document.getElementById('clock')?.classList.add('hidden');
       document.getElementById('legend')?.classList.add('hidden');
       document.getElementById('area-info')?.classList.add('hidden');
+      document.getElementById('export-slice-wrap')?.classList.add('hidden');
       document.getElementById('tooltip')?.classList.add('hidden');
       map?.getContainer()?.classList.remove('draw-area-active');
       setDrawAreaToggleUi(false);
@@ -1779,6 +1837,8 @@
         document.getElementById('legend').classList.remove('hidden');
 
         document.getElementById('area-info').classList.remove('hidden');
+        document.getElementById('export-slice-wrap')?.classList.remove('hidden');
+        if (typeof setSliceExportFormat === 'function') setSliceExportFormat(sliceExportFormat);
         const outPixels = result.nLat * result.nLon;
         const dsTag = sliceBounds.sampleStride > 1 ? ` | downscaled ${sliceBounds.sampleStride}x` : '';
         document.getElementById('area-info').textContent =
@@ -1802,6 +1862,7 @@
       } catch (err) {
         showToast(`Failed to fetch data: ${err.message}`, 'error');
         console.error(err);
+        document.getElementById('export-slice-wrap')?.classList.add('hidden');
       } finally {
         hideLoading();
       }
@@ -1858,7 +1919,7 @@
         const { south, north, west, east } = clampLatLonBounds(bb0);
         if (!bboxLooksLikeLatLon({ west, east, south, north })) {
           showToast(
-            'Bounds do not look like WGS 84 lat/lon. Export as geographic coordinates (EPSG:4326) or include a .prj in the zip.',
+            'Bounds do not look like WGS 84 lat/lon. Use geographic coordinates (EPSG:4326) or include a .prj in the zip.',
             'error',
           );
           return;
@@ -1878,6 +1939,894 @@
         console.error(err);
       }
     }
+
+    const ATTRIBUTION_TXT = `ClimWorx — forecast grid slice export
+======================================
+
+Source data: Deutscher Wetterdienst (DWD), ICON numerical weather prediction output,
+distributed as Open Data at https://opendata.dwd.de/
+
+License (DWD geodata / open spatial data): Creative Commons Attribution 4.0 International (CC BY 4.0)
+https://creativecommons.org/licenses/by/4.0/
+
+When you share or republish this export, give appropriate credit to the DWD, retain a
+notice of this license, and indicate if you changed the material. This ZIP is not an
+official DWD product: values are a subset regridded to 0.125° lat/lon and clipped to your
+selected region by the ClimWorx dashboard.
+
+Further reading:
+• DWD Open Data FAQ: https://www.dwd.de/DE/leistungen/opendata/faqs_opendata.html
+• DWD legal notice (EN): https://www.dwd.de/EN/service/legal_notice/legal_notice_node.html
+`;
+
+    function f32LittleEndianBytes(arr) {
+      if (!arr || !(arr instanceof Float32Array)) return new Uint8Array(0);
+      return new Uint8Array(arr.buffer.slice(arr.byteOffset, arr.byteOffset + arr.byteLength));
+    }
+
+    function latLonAxisForSlice(sb) {
+      const { latStart, lonStart, nLat, nLon, sampleStride = 1 } = sb;
+      const latitudes = [];
+      const longitudes = [];
+      for (let i = 0; i < nLat; i++) {
+        const midRow = latStart + i * sampleStride + (sampleStride - 1) / 2;
+        latitudes.push(LAT_MAX - midRow * RESOLUTION);
+      }
+      for (let j = 0; j < nLon; j++) {
+        const midCol = lonStart + j * sampleStride + (sampleStride - 1) / 2;
+        longitudes.push(LON_MIN + midCol * RESOLUTION);
+      }
+      return { latitudes, longitudes };
+    }
+
+    function buildSliceManifest() {
+      const sb = sliceBounds;
+      const cfg = paramCfg();
+      const { latitudes, longitudes } = latLonAxisForSlice(sb);
+      const nSteps = stepsArray ? stepsArray.length : Math.floor(sliceData.length / (sb.nLat * sb.nLon));
+      return {
+        formatVersion: 1,
+        climworxExport: true,
+        generatedAt: new Date().toISOString(),
+        sourceAttribution: {
+          dataProvider: 'Deutscher Wetterdienst (DWD)',
+          model: 'ICON Global (subset)',
+          openDataLicense: 'CC BY 4.0',
+          licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
+          dwdOpenDataFaqUrl: 'https://www.dwd.de/DE/leistungen/opendata/faqs_opendata.html',
+          dwdLegalNoticeEnUrl: 'https://www.dwd.de/EN/service/legal_notice/legal_notice_node.html',
+          note: 'Regridded 0.125° lat/lon slice via ClimWorx; not an official DWD product.',
+        },
+        api: { workerBase: WORKER_BASE },
+        modelRun: spatialIndex ? spatialIndex.run : null,
+        modelInitUtc: runInitTime ? runInitTime.toISOString() : null,
+        parameter: {
+          key: currentParam,
+          label: cfg.label,
+          displayUnit: cfg.unit,
+          rawMeaning: 'Float32 values as in Zarr (e.g. t_2m in K); use dashboard paramCfg.convert for display.',
+        },
+        grid: {
+          resolutionDeg: RESOLUTION,
+          ordering: 'C-order float32 [step, lat_northToSouth, lon_westToEast]',
+          nSteps,
+          nLat: sb.nLat,
+          nLon: sb.nLon,
+          forecastHours: stepsArray ? [...stepsArray] : null,
+          bboxGeo: { south: sb.south, west: sb.west, north: sb.north, east: sb.east },
+          indexBounds: { latStart: sb.latStart, latEnd: sb.latEnd, lonStart: sb.lonStart, lonEnd: sb.lonEnd },
+          sampleStride: sb.sampleStride || 1,
+          latitudes,
+          longitudes,
+        },
+        files: isWindCompositeParam()
+          ? {
+              'wind_speed_m_s.f32': 'Float32 little-endian; speed from u/v at each cell',
+              'wind_u_m_s.f32': 'Float32 u component (m/s)',
+              'wind_v_m_s.f32': 'Float32 v component (m/s)',
+            }
+          : {
+              [`${currentParam}.f32`]: 'Float32 little-endian primary field',
+            },
+      };
+    }
+
+    let _fflatePromise = null;
+    function loadFflate() {
+      if (!_fflatePromise) {
+        _fflatePromise = import('https://cdn.jsdelivr.net/npm/fflate@0.8.2/+esm').catch((e) => {
+          _fflatePromise = null;
+          throw e;
+        });
+      }
+      return _fflatePromise;
+    }
+
+    /** NetCDF-3 32-bit classic (big-endian); compatible with netcdfjs / many CF tools. */
+    const NC_DIM = 10;
+    const NC_VAR = 11;
+    const NC_ATT = 12;
+    const NC_FLOAT = 5;
+    const NC_CHAR = 2;
+
+    function sanitizeNcIdent(s) {
+      const t = String(s).replace(/[^A-Za-z0-9_]/g, '_').slice(0, 63);
+      return t && /^[0-9]/.test(t) ? `v_${t}` : (t || 'data_var');
+    }
+
+    function ncNameBlob(name) {
+      const enc = new TextEncoder().encode(name);
+      if (enc.length > 200) throw new Error('NetCDF name too long');
+      let padLen = enc.length;
+      while (padLen % 4 !== 0) padLen++;
+      const out = new Uint8Array(4 + padLen);
+      new DataView(out.buffer).setUint32(0, enc.length, false);
+      out.set(enc, 4);
+      return out;
+    }
+
+    class BEBuf {
+      constructor(init = 32768) {
+        this.a = new Uint8Array(init);
+        this.p = 0;
+      }
+      grow(n) {
+        if (this.p + n <= this.a.length) return;
+        let nl = this.a.length;
+        while (nl < this.p + n) nl *= 2;
+        const nb = new Uint8Array(nl);
+        nb.set(this.a.subarray(0, this.p));
+        this.a = nb;
+      }
+      u8(u) {
+        this.grow(u.length);
+        this.a.set(u, this.p);
+        this.p += u.length;
+      }
+      u32(v) {
+        this.grow(4);
+        new DataView(this.a.buffer, this.a.byteOffset + this.p, 4).setUint32(0, v >>> 0, false);
+        this.p += 4;
+      }
+      align4() {
+        const r = this.p % 4;
+        if (!r) return;
+        const n = 4 - r;
+        this.grow(n);
+        this.a.fill(0, this.p, this.p + n);
+        this.p += n;
+      }
+      view() {
+        return this.a.subarray(0, this.p);
+      }
+    }
+
+    function writeNcCharAttrValue(hdr, str) {
+      const enc = new TextEncoder().encode(str);
+      const n = enc.length;
+      hdr.u32(n);
+      let padLen = n;
+      while (padLen % 4 !== 0) padLen++;
+      const pad = new Uint8Array(padLen);
+      pad.set(enc);
+      hdr.u8(pad);
+    }
+
+    function writeNcAttList(hdr, atts) {
+      if (!atts || !atts.length) {
+        hdr.u32(0);
+        hdr.u32(0);
+        return;
+      }
+      hdr.u32(NC_ATT);
+      hdr.u32(atts.length);
+      for (const a of atts) {
+        hdr.u8(ncNameBlob(a.name));
+        hdr.u32(NC_CHAR);
+        writeNcCharAttrValue(hdr, a.value);
+      }
+    }
+
+    function f32ToBEBytes(arr) {
+      const n = arr.length;
+      const out = new Uint8Array(n * 4);
+      const dv = new DataView(out.buffer);
+      for (let i = 0; i < n; i++) dv.setFloat32(i * 4, arr[i], false);
+      return out;
+    }
+
+    function patchU32BE(u8, pos, v) {
+      new DataView(u8.buffer, u8.byteOffset + pos, 4).setUint32(0, v >>> 0, false);
+    }
+
+    function buildNetcdf3ClassicSliceBytes() {
+      const sb = sliceBounds;
+      const nSteps = stepsArray ? stepsArray.length : Math.floor(sliceData.length / (sb.nLat * sb.nLon));
+      if (!Number.isFinite(nSteps) || nSteps < 1) throw new Error('Invalid step count for NetCDF');
+
+      const { latitudes, longitudes } = latLonAxisForSlice(sb);
+      const fh = Float32Array.from(stepsArray ? stepsArray : Array.from({ length: nSteps }, (_, i) => i));
+      const lat = Float32Array.from(latitudes);
+      const lon = Float32Array.from(longitudes);
+
+      const dims = [
+        ['forecast_hour', nSteps],
+        ['lat', sb.nLat],
+        ['lon', sb.nLon],
+      ];
+
+      const globalAtts = [
+        { name: 'Conventions', value: 'CF-1.8' },
+        { name: 'title', value: 'ICON Global forecast slice (ClimWorx export)' },
+        {
+          name: 'source',
+          value:
+            'Data: Deutscher Wetterdienst (DWD) ICON; 0.125 deg lat/lon subset via ClimWorx. Not an official DWD product.',
+        },
+        { name: 'license', value: 'CC BY 4.0 — https://creativecommons.org/licenses/by/4.0/' },
+        { name: 'references', value: 'https://www.dwd.de/DE/leistungen/opendata/faqs_opendata.html' },
+        { name: 'climworx_worker', value: WORKER_BASE },
+        { name: 'model_run', value: String(spatialIndex && spatialIndex.run ? spatialIndex.run : '') },
+        {
+          name: 'history',
+          value: `Created ${new Date().toISOString()} by ClimWorx (NetCDF-3 classic, big-endian).`,
+        },
+      ];
+
+      const cfg = paramCfg();
+      const varDefs = [
+        {
+          name: 'forecast_hour',
+          dims: [0],
+          attrs: [
+            { name: 'long_name', value: 'Forecast lead time' },
+            { name: 'units', value: 'hour' },
+          ],
+          f32: fh,
+        },
+        {
+          name: 'lat',
+          dims: [1],
+          attrs: [{ name: 'units', value: 'degrees_north' }],
+          f32: lat,
+        },
+        {
+          name: 'lon',
+          dims: [2],
+          attrs: [{ name: 'units', value: 'degrees_east' }],
+          f32: lon,
+        },
+      ];
+
+      if (isWindCompositeParam() && windUSliceData && windVSliceData) {
+        varDefs.push(
+          {
+            name: 'wind_speed',
+            dims: [0, 1, 2],
+            attrs: [
+              { name: 'long_name', value: 'Wind speed at 10 m' },
+              { name: 'units', value: 'm s-1' },
+            ],
+            f32: sliceData,
+          },
+          {
+            name: 'wind_u',
+            dims: [0, 1, 2],
+            attrs: [
+              { name: 'long_name', value: 'Eastward wind 10 m' },
+              { name: 'units', value: 'm s-1' },
+            ],
+            f32: windUSliceData,
+          },
+          {
+            name: 'wind_v',
+            dims: [0, 1, 2],
+            attrs: [
+              { name: 'long_name', value: 'Northward wind 10 m' },
+              { name: 'units', value: 'm s-1' },
+            ],
+            f32: windVSliceData,
+          },
+        );
+      } else {
+        const vname = sanitizeNcIdent(currentParam);
+        varDefs.push({
+          name: vname,
+          dims: [0, 1, 2],
+          attrs: [
+            { name: 'long_name', value: cfg.label },
+            { name: 'units', value: String(cfg.unit).replace(/\s+/g, ' ') },
+            {
+              name: 'description',
+              value:
+                'Float32 as in ICON/Zarr store (e.g. t_2m in K). Use CF metadata and model docs for physical meaning.',
+            },
+          ],
+          f32: sliceData,
+        });
+      }
+
+      for (const v of varDefs) {
+        let nel = 1;
+        for (const di of v.dims) nel *= dims[di][1];
+        v.nel = nel;
+        v.bsize = nel * 4;
+      }
+
+      const hdr = new BEBuf(65536);
+      hdr.u8(new TextEncoder().encode('CDF'));
+      hdr.u8(new Uint8Array([1]));
+      hdr.u32(0);
+
+      hdr.u32(NC_DIM);
+      hdr.u32(dims.length);
+      for (const [dn, ds] of dims) {
+        hdr.u8(ncNameBlob(dn));
+        hdr.u32(ds >>> 0);
+      }
+
+      hdr.u32(NC_ATT);
+      hdr.u32(globalAtts.length);
+      for (const a of globalAtts) {
+        hdr.u8(ncNameBlob(a.name));
+        hdr.u32(NC_CHAR);
+        writeNcCharAttrValue(hdr, a.value);
+      }
+
+      const offsetSlots = [];
+      hdr.u32(NC_VAR);
+      hdr.u32(varDefs.length);
+      for (const v of varDefs) {
+        hdr.u8(ncNameBlob(v.name));
+        hdr.u32(v.dims.length);
+        for (const di of v.dims) hdr.u32(di);
+        writeNcAttList(
+          hdr,
+          v.attrs.map((x) => ({ name: x.name, type: NC_CHAR, value: x.value })),
+        );
+        hdr.u32(NC_FLOAT);
+        hdr.u32(v.bsize >>> 0);
+        offsetSlots.push(hdr.p);
+        hdr.u32(0);
+      }
+      hdr.align4();
+
+      const dataStart = hdr.p;
+      let off = dataStart;
+      const dataParts = [];
+      for (let i = 0; i < varDefs.length; i++) {
+        patchU32BE(hdr.a, offsetSlots[i], off);
+        const part = f32ToBEBytes(varDefs[i].f32);
+        if (part.length !== varDefs[i].bsize) {
+          throw new Error(`NetCDF size mismatch for ${varDefs[i].name}`);
+        }
+        dataParts.push(part);
+        off += part.length;
+      }
+
+      const hbytes = hdr.view();
+      const total = new Uint8Array(off);
+      total.set(hbytes, 0);
+      let q = dataStart;
+      for (const part of dataParts) {
+        total.set(part, q);
+        q += part.length;
+      }
+      return total;
+    }
+
+    const SLICE_EXPORT_CTRL_IDS = ['btn-export-run', 'btn-export-fmt-zip', 'btn-export-fmt-nc', 'btn-export-fmt-gif'];
+
+    function setSliceExportControlsDisabled(disabled) {
+      for (const id of SLICE_EXPORT_CTRL_IDS) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = disabled;
+      }
+    }
+
+    window.setSliceExportFormat = function (fmt) {
+      if (fmt !== 'zip' && fmt !== 'nc' && fmt !== 'gif') return;
+      sliceExportFormat = fmt;
+      const wrap = document.getElementById('export-slice-wrap');
+      const zip = document.getElementById('btn-export-fmt-zip');
+      const nc = document.getElementById('btn-export-fmt-nc');
+      const gif = document.getElementById('btn-export-fmt-gif');
+      const run = document.getElementById('btn-export-run');
+      const runLabel = document.getElementById('btn-export-run-label');
+      const hint = document.getElementById('export-format-hint');
+      if (wrap) wrap.setAttribute('data-export-fmt', fmt);
+
+      const inactive =
+        'export-fmt-btn py-2.5 text-[11px] sm:text-xs font-semibold tracking-tight transition-all text-white/45 hover:text-white/80 hover:bg-white/5';
+      const active = {
+        zip: 'export-fmt-btn py-2.5 text-[11px] sm:text-xs font-semibold tracking-tight transition-all bg-emerald-500/20 text-emerald-100',
+        nc: 'export-fmt-btn py-2.5 text-[11px] sm:text-xs font-semibold tracking-tight transition-all bg-sky-500/20 text-sky-100',
+        gif: 'export-fmt-btn py-2.5 text-[11px] sm:text-xs font-semibold tracking-tight transition-all bg-violet-500/20 text-violet-100',
+      };
+      if (zip) {
+        zip.className = fmt === 'zip' ? active.zip : inactive;
+        zip.setAttribute('aria-selected', fmt === 'zip' ? 'true' : 'false');
+      }
+      if (nc) {
+        nc.className = fmt === 'nc' ? active.nc : inactive;
+        nc.setAttribute('aria-selected', fmt === 'nc' ? 'true' : 'false');
+      }
+      if (gif) {
+        gif.className = fmt === 'gif' ? active.gif : inactive;
+        gif.setAttribute('aria-selected', fmt === 'gif' ? 'true' : 'false');
+      }
+
+      const runCls = {
+        zip: 'w-full mt-2 py-2.5 rounded-xl text-xs font-semibold border transition-all shadow-sm bg-emerald-500/15 text-emerald-100 border-emerald-400/40 hover:bg-emerald-500/25 hover:border-emerald-300/50 active:scale-[0.99]',
+        nc: 'w-full mt-2 py-2.5 rounded-xl text-xs font-semibold border transition-all shadow-sm bg-sky-500/15 text-sky-100 border-sky-400/40 hover:bg-sky-500/25 hover:border-sky-300/50 active:scale-[0.99]',
+        gif: 'w-full mt-2 py-2.5 rounded-xl text-xs font-semibold border transition-all shadow-sm bg-violet-500/15 text-violet-100 border-violet-400/40 hover:bg-violet-500/25 hover:border-violet-300/50 active:scale-[0.99]',
+      };
+      if (run) run.className = runCls[fmt];
+
+      const labels = { zip: 'Download ZIP', nc: 'Download NetCDF', gif: 'Download GIF' };
+      if (runLabel) runLabel.textContent = labels[fmt];
+
+      const hints = {
+        zip:
+          '<span class="font-mono text-white/45">manifest.json</span> + raw <span class="font-mono text-white/45">.f32</span> + <span class="font-mono text-white/45">ATTRIBUTION.txt</span> (DWD · CC BY 4.0).',
+        nc:
+          'NetCDF-3 classic (not HDF5) — <span class="font-mono text-white/45">forecast_hour</span>, <span class="font-mono text-white/45">lat</span>, <span class="font-mono text-white/45">lon</span>; primary field float32, big-endian.',
+        gif:
+          'Captures the <strong class="text-white/55">current map view</strong> (basemap + forecast + contours if on; wind ribbons when applicable). Each frame adds a <strong class="text-white/55">color ramp</strong> (top-right, same scale as the legend) plus <strong class="text-white/55">valid time</strong> in the footer. Long runs subsample to ~100 frames; side ≤ 640 px.',
+      };
+      if (hint) hint.innerHTML = hints[fmt];
+    };
+
+    window.runSliceExportDownload = function () {
+      if (sliceExportFormat === 'nc') return downloadNetcdfSlice();
+      if (sliceExportFormat === 'gif') return downloadForecastGif();
+      return downloadClimworxSliceExport();
+    };
+
+    window.downloadNetcdfSlice = async function() {
+      if (!sliceData || !sliceBounds || !spatialIndex) {
+        showToast('Load a map region first, then download.', 'info');
+        return;
+      }
+      setSliceExportControlsDisabled(true);
+      try {
+        showLoading('Building NetCDF…');
+        await new Promise((r) => setTimeout(r, 0));
+        const bytes = buildNetcdf3ClassicSliceBytes();
+        const runPart = String(spatialIndex.run || 'unknown').replace(/[^\w.-]+/g, '_');
+        const name = `climworx_slice_${runPart}_${currentParam}.nc`;
+        hideLoading();
+        const blob = new Blob([bytes], { type: 'application/x-netcdf' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+        showToast('NetCDF download started.', 'success');
+      } catch (err) {
+        hideLoading();
+        showToast(`NetCDF export failed: ${err && err.message ? err.message : String(err)}`, 'error');
+        console.error(err);
+      } finally {
+        setSliceExportControlsDisabled(false);
+      }
+    };
+
+    /** Offscreen canvas for GIF frame scaling (reuse to limit allocations). */
+    let _gifScaleCanvas = null;
+
+    /**
+     * Wait for one map paint after renderFrame() updated the raster source.
+     * We intentionally do NOT use MapLibre `idle` here: `idle` waits for all tile
+     * network activity to finish, so basemap prefetch can stall every GIF frame for seconds.
+     */
+    function waitForGifMapPaint() {
+      return new Promise((resolve) => {
+        if (!map) {
+          resolve();
+          return;
+        }
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        requestAnimationFrame(() => {
+          const tid = setTimeout(finish, 500);
+          map.once('render', () => {
+            clearTimeout(tid);
+            finish();
+          });
+          map.triggerRepaint();
+        });
+      });
+    }
+
+    /**
+     * Full viewport for GIF: basemap (WebGL) + wind + contour, scaled straight to maxSide
+     * (avoids a full-resolution CPU composite each frame).
+     */
+    function getScaledMapViewportImageData(maxSide) {
+      const mapCv = map && typeof map.getCanvas === 'function' ? map.getCanvas() : null;
+      if (!mapCv || mapCv.width < 1 || mapCv.height < 1) return null;
+      const w = mapCv.width;
+      const h = mapCv.height;
+      const m = Math.max(w, h);
+      let dw = w;
+      let dh = h;
+      if (m > maxSide) {
+        const sc = maxSide / m;
+        dw = Math.max(1, Math.floor(w * sc));
+        dh = Math.max(1, Math.floor(h * sc));
+      }
+      if (!_gifScaleCanvas) _gifScaleCanvas = document.createElement('canvas');
+      _gifScaleCanvas.width = dw;
+      _gifScaleCanvas.height = dh;
+      const x = _gifScaleCanvas.getContext('2d', { willReadFrequently: true });
+      x.imageSmoothingEnabled = dw < w;
+      x.clearRect(0, 0, dw, dh);
+      try {
+        x.drawImage(mapCv, 0, 0, w, h, 0, 0, dw, dh);
+      } catch (e) {
+        console.warn('GIF: map canvas draw failed', e);
+        return null;
+      }
+      if (windOverlayCanvas && windOverlayCanvas.width > 0) {
+        try {
+          x.drawImage(windOverlayCanvas, 0, 0, w, h, 0, 0, dw, dh);
+        } catch (_) { /* optional layer */ }
+      }
+      if (contourLabelOverlayCanvas && contourLabelOverlayCanvas.width > 0) {
+        try {
+          x.drawImage(contourLabelOverlayCanvas, 0, 0, w, h, 0, 0, dw, dh);
+        } catch (_) { /* optional layer */ }
+      }
+      try {
+        return x.getImageData(0, 0, dw, dh);
+      } catch (e) {
+        console.warn('GIF: viewport pixel read failed', e);
+        return null;
+      }
+    }
+
+    function getScaledRasterImageData(maxSide) {
+      const w = renderCanvas.width;
+      const h = renderCanvas.height;
+      if (!renderCanvas || w < 1 || h < 1) return null;
+      const m = Math.max(w, h);
+      let dw = w;
+      let dh = h;
+      if (m > maxSide) {
+        const sc = maxSide / m;
+        dw = Math.max(1, Math.floor(w * sc));
+        dh = Math.max(1, Math.floor(h * sc));
+      }
+      if (!_gifScaleCanvas) _gifScaleCanvas = document.createElement('canvas');
+      _gifScaleCanvas.width = dw;
+      _gifScaleCanvas.height = dh;
+      const x = _gifScaleCanvas.getContext('2d', { willReadFrequently: true });
+      x.imageSmoothingEnabled = dw < w;
+      x.clearRect(0, 0, dw, dh);
+      x.drawImage(renderCanvas, 0, 0, w, h, 0, 0, dw, dh);
+      return x.getImageData(0, 0, dw, dh);
+    }
+
+    let _gifStampCanvas = null;
+
+    function gifBannerRoundRect(ctx, x, y, bw, bh, r) {
+      const rr = Math.min(r, bw / 2, bh / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + rr, y);
+      ctx.arcTo(x + bw, y, x + bw, y + bh, rr);
+      ctx.arcTo(x + bw, y + bh, x, y + bh, rr);
+      ctx.arcTo(x, y + bh, x, y, rr);
+      ctx.arcTo(x, y, x + bw, y, rr);
+      ctx.closePath();
+    }
+
+    /** Vertical color ramp + min/max (same scale as map legend), top-right (mutates imageData). */
+    function stampGifColorRampInto(imageData) {
+      if (!colorScale || !Number.isFinite(dataMin) || !Number.isFinite(dataMax)) return;
+      if (dataMax === dataMin) return;
+
+      const w = imageData.width;
+      const h = imageData.height;
+      const m = Math.min(w, h);
+      const margin = Math.max(6, Math.floor(m * 0.018));
+      const barW = Math.max(9, Math.floor(m * 0.026));
+      const barH = Math.min(Math.floor(h * 0.36), 168);
+      let fs = Math.max(8, Math.min(13, Math.floor(barW * 1.2)));
+      const { unit, decimals } = paramCfg();
+      const maxStr = `${dataMax.toFixed(decimals)}${unit}`;
+      const minStr = `${dataMin.toFixed(decimals)}${unit}`;
+
+      if (!_gifStampCanvas) _gifStampCanvas = document.createElement('canvas');
+      _gifStampCanvas.width = w;
+      _gifStampCanvas.height = h;
+      const ctx = _gifStampCanvas.getContext('2d', { willReadFrequently: true });
+      ctx.putImageData(imageData, 0, 0);
+
+      const innerPad = 6;
+      let boxW = barW + innerPad * 2 + 4;
+      let textW = 0;
+      while (fs >= 7) {
+        ctx.font = `600 ${fs}px ui-monospace, Menlo, Consolas, monospace`;
+        textW = Math.max(ctx.measureText(maxStr).width, ctx.measureText(minStr).width);
+        boxW = Math.ceil(Math.max(barW + innerPad * 2 + 4, textW + innerPad * 2));
+        if (boxW <= w - margin * 2) break;
+        fs--;
+      }
+      const boxH = innerPad + fs + 4 + barH + 4 + fs + innerPad;
+      const maxBoxW = w - margin * 2;
+      if (boxW > maxBoxW) boxW = maxBoxW;
+      const bx = Math.max(margin, w - margin - boxW);
+      const by = margin;
+
+      gifBannerRoundRect(ctx, bx, by, boxW, boxH, Math.min(9, boxH / 4));
+      ctx.fillStyle = 'rgba(0,0,0,0.58)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.26)';
+      ctx.lineWidth = Math.max(1, Math.floor(w / 450));
+      gifBannerRoundRect(ctx, bx, by, boxW, boxH, Math.min(9, boxH / 4));
+      ctx.stroke();
+
+      const cx = bx + boxW / 2;
+      const barLeft = bx + (boxW - barW) / 2;
+      const barTop = by + innerPad + fs + 3;
+
+      ctx.fillStyle = '#f8fafc';
+      ctx.font = `600 ${fs}px ui-monospace, Menlo, Consolas, monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(maxStr, cx, by + innerPad);
+
+      for (let py = 0; py < barH; py++) {
+        const t = barH > 1 ? py / (barH - 1) : 0;
+        const val = dataMax - t * (dataMax - dataMin);
+        ctx.fillStyle = colorScale(val);
+        ctx.fillRect(barLeft, barTop + py, barW, 1);
+      }
+
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillText(minStr, cx, barTop + barH + 4);
+
+      const stamped = ctx.getImageData(0, 0, w, h);
+      imageData.data.set(stamped.data);
+    }
+
+    /** Draws a footer on each GIF frame: lead time + valid UTC time + run id (mutates imageData). */
+    function stampGifTimeBannerInto(imageData, stepIndex) {
+      const w = imageData.width;
+      const h = imageData.height;
+      const leadH =
+        stepsArray && stepIndex >= 0 && stepIndex < stepsArray.length ? stepsArray[stepIndex] : stepIndex;
+
+      let line1 = `T+${leadH}h`;
+      if (runInitTime && Number.isFinite(Number(leadH))) {
+        const lh = Number(leadH);
+        const validTime = new Date(runInitTime.getTime() + lh * 3600 * 1000);
+        const opts = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' };
+        line1 = `T+${lh}h · ${validTime.toLocaleDateString('en-US', opts)} UTC`;
+      }
+
+      let line2Full = '';
+      if (spatialIndex && spatialIndex.run && String(spatialIndex.run).length >= 10) {
+        const r = String(spatialIndex.run);
+        line2Full = `ICON ${r.slice(0, 4)}-${r.slice(4, 6)}-${r.slice(6, 8)} ${r.slice(8)}Z  |  ${currentParam}`;
+      } else {
+        line2Full = String(currentParam || '');
+      }
+
+      if (!_gifStampCanvas) _gifStampCanvas = document.createElement('canvas');
+      _gifStampCanvas.width = w;
+      _gifStampCanvas.height = h;
+      const ctx = _gifStampCanvas.getContext('2d', { willReadFrequently: true });
+
+      const pad = Math.max(5, Math.floor(Math.min(w, h) * 0.014));
+      const maxTextW = w - pad * 3;
+      let f0 = Math.max(10, Math.floor(Math.min(w, h) * 0.036));
+      let s0 = Math.max(8, f0 - 2);
+      while (f0 >= 8) {
+        s0 = Math.max(8, f0 - 2);
+        ctx.font = `600 ${f0}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+        const w1 = ctx.measureText(line1).width;
+        ctx.font = `500 ${s0}px ui-monospace, Menlo, Consolas, monospace`;
+        const w2 = ctx.measureText(line2Full).width;
+        if (Math.max(w1, w2) <= maxTextW) break;
+        f0--;
+      }
+
+      let line2Draw = line2Full;
+      ctx.font = `500 ${s0}px ui-monospace, Menlo, Consolas, monospace`;
+      while (line2Draw.length > 8 && ctx.measureText(`${line2Draw}…`).width > maxTextW) {
+        line2Draw = line2Draw.slice(0, -1);
+      }
+      if (line2Draw.length < line2Full.length) line2Draw = `${line2Draw}…`;
+
+      const lineGap = Math.round(f0 * 0.22);
+      const boxPad = pad;
+      const textBlockH = f0 + lineGap + s0;
+      const boxH = textBlockH + boxPad * 2;
+      const boxW = w - pad * 2;
+      const bx = pad;
+      const by = h - boxH - pad;
+
+      ctx.putImageData(imageData, 0, 0);
+      ctx.fillStyle = 'rgba(0,0,0,0.62)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+      ctx.lineWidth = Math.max(1, Math.floor(w / 420));
+      gifBannerRoundRect(ctx, bx, by, boxW, boxH, Math.min(10, boxH / 3));
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = '#f8fafc';
+      ctx.textBaseline = 'top';
+      ctx.font = `600 ${f0}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+      ctx.fillText(line1, bx + boxPad, by + boxPad);
+      ctx.fillStyle = 'rgba(248,250,252,0.92)';
+      ctx.font = `500 ${s0}px ui-monospace, Menlo, Consolas, monospace`;
+      ctx.fillText(line2Draw, bx + boxPad, by + boxPad + f0 + lineGap);
+
+      const stamped = ctx.getImageData(0, 0, w, h);
+      imageData.data.set(stamped.data);
+    }
+
+    let _gifencPromise = null;
+    function loadGifenc() {
+      if (!_gifencPromise) {
+        _gifencPromise = import('https://cdn.jsdelivr.net/npm/gifenc@1.0.3/+esm').catch((e) => {
+          _gifencPromise = null;
+          throw e;
+        });
+      }
+      return _gifencPromise;
+    }
+
+    window.downloadForecastGif = async function() {
+      if (!sliceData || !sliceBounds || !spatialIndex) {
+        showToast('Load a map region first.', 'info');
+        return;
+      }
+      const nSteps = stepsArray ? stepsArray.length : 1;
+      const MAX_FRAMES = 100;
+      const MAX_SIDE = 640;
+      // gifenc `delay` is milliseconds. ~350  — easier to read the footer; 100ms was ~10 fps.
+      const FRAME_DELAY_MS = 350;
+
+      const indices = [];
+      if (nSteps <= MAX_FRAMES) {
+        for (let i = 0; i < nSteps; i++) indices.push(i);
+      } else {
+        const skip = Math.ceil(nSteps / MAX_FRAMES);
+        for (let i = 0; i < nSteps; i += skip) indices.push(i);
+        if (indices[indices.length - 1] !== nSteps - 1) indices.push(nSteps - 1);
+      }
+
+      setSliceExportControlsDisabled(true);
+
+      const savedStep = currentStep;
+      showLoading('Preparing GIF…');
+      await new Promise((r) => setTimeout(r, 0));
+
+      try {
+        const { GIFEncoder, quantize, applyPalette } = await loadGifenc();
+        const gif = GIFEncoder();
+        let palette = null;
+        let fw = 0;
+        let fh = 0;
+
+        for (let fi = 0; fi < indices.length; fi++) {
+          currentStep = indices[fi];
+          renderFrame();
+          await waitForGifMapPaint();
+          let id = getScaledMapViewportImageData(MAX_SIDE);
+          if (!id || id.width < 1 || id.height < 1) {
+            id = getScaledRasterImageData(MAX_SIDE);
+          }
+          if (!id || id.width < 1 || id.height < 1) throw new Error('No raster to capture');
+          stampGifColorRampInto(id);
+          stampGifTimeBannerInto(id, indices[fi]);
+          if (fi === 0) {
+            fw = id.width;
+            fh = id.height;
+            palette = quantize(id.data, 256);
+            const idx = applyPalette(id.data, palette);
+            gif.writeFrame(idx, fw, fh, { palette, delay: FRAME_DELAY_MS, repeat: 0 });
+          } else {
+            if (id.width !== fw || id.height !== fh) throw new Error('Frame size mismatch');
+            const idx = applyPalette(id.data, palette);
+            gif.writeFrame(idx, fw, fh, { delay: FRAME_DELAY_MS });
+          }
+          setLoadingText(`GIF: frame ${fi + 1} / ${indices.length}`);
+        }
+
+        gif.finish();
+        const bytes = gif.bytes();
+        currentStep = savedStep;
+        renderFrame();
+        updateTimeline();
+
+        const runPart = String(spatialIndex.run || 'unknown').replace(/[^\w.-]+/g, '_');
+        const name = `climworx_forecast_${runPart}_${currentParam}.gif`;
+
+        hideLoading();
+        const blob = new Blob([bytes], { type: 'image/gif' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+        showToast('GIF download started.', 'success');
+      } catch (err) {
+        currentStep = savedStep;
+        renderFrame();
+        updateTimeline();
+        hideLoading();
+        showToast(`GIF export failed: ${err && err.message ? err.message : String(err)}`, 'error');
+        console.error(err);
+      } finally {
+        setSliceExportControlsDisabled(false);
+      }
+    };
+
+    window.downloadClimworxSliceExport = async function() {
+      if (!sliceData || !sliceBounds || !spatialIndex) {
+        showToast('Load a map region first, then download.', 'info');
+        return;
+      }
+      setSliceExportControlsDisabled(true);
+      try {
+        showLoading('Building ZIP…');
+        await new Promise((r) => setTimeout(r, 0));
+
+        const manifest = buildSliceManifest();
+        const files = {
+          'ATTRIBUTION.txt': new TextEncoder().encode(ATTRIBUTION_TXT),
+          'manifest.json': new TextEncoder().encode(JSON.stringify(manifest, null, 2)),
+        };
+
+        if (isWindCompositeParam() && windUSliceData && windVSliceData) {
+          files['wind_speed_m_s.f32'] = f32LittleEndianBytes(sliceData);
+          files['wind_u_m_s.f32'] = f32LittleEndianBytes(windUSliceData);
+          files['wind_v_m_s.f32'] = f32LittleEndianBytes(windVSliceData);
+        } else {
+          files[`${currentParam}.f32`] = f32LittleEndianBytes(sliceData);
+        }
+
+        const { zipSync } = await loadFflate();
+        const zipped = zipSync(files, { level: 6 });
+        const runPart = String(spatialIndex.run || 'unknown').replace(/[^\w.-]+/g, '_');
+        const name = `climworx_slice_${runPart}_${currentParam}.zip`;
+
+        hideLoading();
+        const blob = new Blob([zipped], { type: 'application/zip' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+        showToast('Download started.', 'success');
+      } catch (err) {
+        hideLoading();
+        showToast(`Export failed: ${err && err.message ? err.message : String(err)}`, 'error');
+        console.error(err);
+      } finally {
+        setSliceExportControlsDisabled(false);
+      }
+    };
 
     // =======================================================================
     // Color Scales
@@ -2712,6 +3661,7 @@
         clearDataOverlay();
         showLoading('Preparing request...');
         setLoadingProgress(5, 'Preparing');
+        document.getElementById('export-slice-wrap')?.classList.add('hidden');
 
         const fetcher = isWindCompositeParam(param)
           ? fetchCombinedWindSlice(sliceBounds.latStart, sliceBounds.latEnd, sliceBounds.lonStart, sliceBounds.lonEnd, sliceBounds.sampleStride || 1)
@@ -2732,6 +3682,8 @@
             setLoadingText('Rendering map...');
             setLoadingProgress(99, 'Rendering');
             renderFrame();
+            document.getElementById('export-slice-wrap')?.classList.remove('hidden');
+            if (typeof setSliceExportFormat === 'function') setSliceExportFormat(sliceExportFormat);
           })
           .catch(err => showToast(`Failed: ${err.message}`, 'error'))
           .finally(() => hideLoading());
